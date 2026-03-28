@@ -70,6 +70,11 @@ bool comp;
 bool comp_prev;
 float time_est = 3600;
 
+// Internal state for logging
+float debug_active_rate = 0;
+float debug_confidence = 0;
+float debug_alpha = 0;
+
 float readTemp();
 void updateDisplay();
 
@@ -162,24 +167,29 @@ void loop() {
 
   // PHYS-ADAPTIVE HYBRID ESTIMATION
   int sample_count = window_full ? WINDOW_SIZE : window_idx;
-  float confidence = (float)sample_count / (float)WINDOW_SIZE;
-  float active_rate = (smoothed_rate > 1e-9) ? ((avg_rate_history * (1.0 - confidence)) + (smoothed_rate * confidence)) : avg_rate_history;
+  debug_confidence = (float)sample_count / (float)WINDOW_SIZE;
+  debug_active_rate = (smoothed_rate > 1e-9) ? ((avg_rate_history * (1.0 - debug_confidence)) + (smoothed_rate * debug_confidence)) : avg_rate_history;
 
   float decay = exp(-(float)(millis() - door_closed_time) / 1200000.0);
   float active_penalty = door_penalty_accum * decay;
   float effective_food = food_temp_est + active_penalty;
 
-  float current_alpha = active_rate / (calc_air_temp - food_temp_est + 0.1);
-  if (current_alpha < 1e-6) current_alpha = food_alpha;
+  debug_alpha = debug_active_rate / (calc_air_temp - food_temp_est + 0.1);
+
+  // Dynamic alpha bounding
+  float min_alpha = 0.00002;
+  float max_alpha = 0.0005;
+  if (debug_alpha < min_alpha) debug_alpha = min_alpha;
+  if (debug_alpha > max_alpha) debug_alpha = max_alpha;
 
   float raw_time;
-  if (active_rate > 1e-9 && calc_air_temp > temp_target + 0.8 && effective_food < temp_target) {
+  if (debug_active_rate > 1e-9 && calc_air_temp > temp_target + 0.2 && effective_food < temp_target) {
       float ratio = (calc_air_temp - temp_target) / (calc_air_temp - effective_food);
-      raw_time = - (1.0 / current_alpha) * log(ratio);
+      raw_time = - (1.0 / debug_alpha) * log(ratio);
   } else if (effective_food >= temp_target) {
       raw_time = 0;
   } else {
-      raw_time = (temp_target - effective_food) / (active_rate > 1e-9 ? active_rate : 0.0001);
+      raw_time = (temp_target - effective_food) / (debug_active_rate > 1e-9 ? debug_active_rate : 0.0001);
   }
 
   time_est = time_est * 0.9 + raw_time * 0.1;

@@ -15,13 +15,19 @@ public:
 
     // Parameters for a typical fridge
     double c_air = 200.0;
-    double c_food = 2000.0;    // Increased mass
+    double c_food = 2000.0;
     double r_insulation = 40.0;
-    double r_coupling = 10.0;   // T_food Tau = 2000 * 10 = 20000s (~5.5 hours)
+    double r_coupling = 10.0;
     double r_door_open = 1.5;
     double cooling_power = 70.0;
 
     double noise_stddev = 0.5;
+
+    void setParams(double ambient, double food_mass_ratio) {
+        ambient_temp = ambient;
+        c_food = 2000.0 * food_mass_ratio;
+    }
+
     std::mt19937 gen{42};
 
     void update(double dt) {

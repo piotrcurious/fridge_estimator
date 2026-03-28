@@ -79,16 +79,35 @@ void log_csv(std::ostream& os) {
        << filtered_temp << ","
        << food_temp_est << ","
        << fridge.t_food << ","
-       << target << std::endl;
+       << target << ","
+       << debug_active_rate << ","
+       << debug_confidence << ","
+       << debug_alpha << std::endl;
 }
 
 int main(int argc, char** argv) {
+    double ambient = 25.0;
+    double mass_ratio = 1.0;
+    std::string out_path = "";
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--ambient" && i + 1 < argc) {
+            ambient = std::stod(argv[++i]);
+        } else if (arg == "--mass" && i + 1 < argc) {
+            mass_ratio = std::stod(argv[++i]);
+        } else if (arg == "--out" && i + 1 < argc) {
+            out_path = argv[++i];
+        }
+    }
+
+    fridge.setParams(ambient, mass_ratio);
     setup();
 
     std::ostream* out = &std::cout;
     std::ofstream file_out;
-    if (argc > 1) {
-        file_out.open(argv[1]);
+    if (!out_path.empty()) {
+        file_out.open(out_path);
         out = &file_out;
     }
 
@@ -98,8 +117,8 @@ int main(int argc, char** argv) {
     float target = temp_threshold;
     #endif
 
-    std::cerr << "Starting Simulation. Target: " << target << "C" << std::endl;
-    *out << "time,true_air,est,door,compressor,filtered_temp,food_proxy,true_food,target" << std::endl;
+    std::cerr << "Starting Simulation. Target: " << target << "C, Ambient: " << ambient << "C, Mass: " << mass_ratio << "x" << std::endl;
+    *out << "time,true_air,est,door,compressor,filtered_temp,food_proxy,true_food,target,active_rate,confidence,alpha" << std::endl;
 
     for (int cycle = 0; cycle < 5; ++cycle) {
         // 1. Cool down

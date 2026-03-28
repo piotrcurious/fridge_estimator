@@ -65,6 +65,11 @@ float smoothed_rate = 0;
 float temp_threshold = 4.0;
 float temp_time = 3600;
 
+// Internal state for logging
+float debug_active_rate = 0;
+float debug_confidence = 0;
+float debug_alpha = 0;
+
 bool light;
 bool light_prev;
 unsigned long light_start;
@@ -163,21 +168,26 @@ void loop() {
 
   // STABLE LOGARITHMIC ESTIMATION
   int sample_count = window_full ? WINDOW_SIZE : window_idx;
-  float confidence = (float)sample_count / (float)WINDOW_SIZE;
-  float active_rate = (smoothed_rate > 1e-9) ? ((avg_rate_history * (1.0 - confidence)) + (smoothed_rate * confidence)) : avg_rate_history;
+  debug_confidence = (float)sample_count / (float)WINDOW_SIZE;
+  debug_active_rate = (smoothed_rate > 1e-9) ? ((avg_rate_history * (1.0 - debug_confidence)) + (smoothed_rate * debug_confidence)) : avg_rate_history;
   
   float door_impact = 1.0 + (float)light_cycle_total / 10000.0;
-  float current_alpha = active_rate / (calc_air_temp - food_temp_est + 0.1);
-  if (current_alpha < 1e-6) current_alpha = food_alpha;
+  debug_alpha = debug_active_rate / (calc_air_temp - food_temp_est + 0.1);
+
+  // Dynamic alpha bounding
+  float min_alpha = 0.00002;
+  float max_alpha = 0.0005;
+  if (debug_alpha < min_alpha) debug_alpha = min_alpha;
+  if (debug_alpha > max_alpha) debug_alpha = max_alpha;
 
   float raw_time;
   if (food_temp_est < temp_threshold && calc_air_temp > temp_threshold + 0.5) {
       float ratio = (calc_air_temp - temp_threshold) / (calc_air_temp - food_temp_est);
-      raw_time = - (1.0 / (current_alpha * door_impact)) * log(ratio);
+      raw_time = - (1.0 / (debug_alpha * door_impact)) * log(ratio);
   } else if (food_temp_est >= temp_threshold) {
       raw_time = 0;
   } else {
-      raw_time = (temp_threshold - food_temp_est) / (active_rate * door_impact);
+      raw_time = (temp_threshold - food_temp_est) / (debug_active_rate * door_impact);
   }
 
   // Final Smoothing on output
@@ -203,10 +213,7 @@ void updateDisplay() {
   display.setCursor(0,0);
   display.println("F-Estimator V1 (Adap)");
   display.setCursor(0,15);
-  int sample_count = window_full ? WINDOW_SIZE : window_idx;
-  float confidence = (float)sample_count / (float)WINDOW_SIZE;
-  float active_rate = (smoothed_rate > 1e-9) ? ((avg_rate_history * (1.0 - confidence)) + (smoothed_rate * confidence)) : avg_rate_history;
-  display.print("Rate: "); display.print(active_rate * 1000000.0, 1);
+  display.print("Rate: "); display.print(debug_active_rate * 1000000.0, 1);
   display.setCursor(0,30);
   display.print("Est: "); display.print(temp_time, 0); display.print(" s");
   display.display();
