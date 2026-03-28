@@ -107,12 +107,18 @@ void loop() {
   
   temp = readTemp(); // Read current temperature from sensor
   
+  static float filtered_temp = 0;
+  if (filtered_temp == 0) filtered_temp = temp;
+  filtered_temp = filtered_temp * 0.9 + temp * 0.1;
+
   if (last_millis > 0) {
-    // Smooth the rate calculation
-    float instant_rate = (temp - temp_prev) / dt;
-    // VERY Strong EMA to handle noisy sensor data
-    temp_rate = temp_rate * 0.995 + instant_rate * 0.005;
+    // Smooth the rate calculation using the filtered temperature
+    float instant_rate = (filtered_temp - temp_prev) / dt;
+    // EMA to handle noisy sensor data - slightly faster than before
+    temp_rate = temp_rate * 0.98 + instant_rate * 0.02;
+    temp_prev = filtered_temp;
   } else {
+    temp_prev = filtered_temp;
     temp_rate = 0;
   }
   last_millis = current_m;
@@ -143,113 +149,98 @@ void loop() {
   static float last_est_before_threshold = 0;
   static unsigned long est_capture_time = 0;
   // Capture a stable estimate when we are about 50% through the warming cycle
-  // Only capture if we have a positive and non-trivial rate
   if (temp > (temp_threshold + 2.0) / 2.0 && temp < temp_threshold - 0.5 && temp_rate > 0.0001) {
     last_est_before_threshold = temp_time;
     est_capture_time = millis();
   }
 
   static unsigned long last_threshold_reached = 0;
-  if (temp >= temp_threshold && (last_threshold_reached == 0 || millis() - last_threshold_reached > 300000)) { // Ensure it's a new event (5 min cooldown)
+  if (temp >= temp_threshold && (last_threshold_reached == 0 || millis() - last_threshold_reached > 300000)) { // 5 min cooldown
     if (last_threshold_reached > 0) {
       float cycle_duration = (float)(millis() - last_threshold_reached) / 1000.0;
-      addSample(cycle_duration); // Add cycle duration to sample array
-      sample_mean = calcMean(); // Calculate the mean of the samples in the array
+      addSample(cycle_duration);
+      sample_mean = calcMean();
 
-      // Adapt the correction factor based on the error
-      // Use the last estimated time before reaching threshold for comparison
       if (last_est_before_threshold > 0 && est_capture_time > last_threshold_reached) {
         float actual_remaining = cycle_duration - (float)(est_capture_time - last_threshold_reached) / 1000.0;
-        if (actual_remaining > 30.0) { // Only adapt if significant time was remaining
+        if (actual_remaining > 30.0) {
           float error_ratio = actual_remaining / last_est_before_threshold;
-          // Very conservative adjustment to avoid oscillations
-          log_corr = log_corr * (0.95 + 0.05 * error_ratio);
+          log_corr = log_corr * (0.9 + 0.1 * error_ratio); // Slightly more aggressive learning
           log_corr = constrain(log_corr, 0.5, 2.0);
           Serial.print("Actual remaining: "); Serial.println(actual_remaining);
           Serial.print("Last estimate: "); Serial.println(last_est_before_threshold);
           Serial.print("Adjusted log_corr to: "); Serial.println(log_corr);
         }
       }
-      last_est_before_threshold = 0; // Reset for next cycle
+      last_est_before_threshold = 0;
     }
     last_threshold_reached = millis();
-    resetLight(); // Reset the light duration variables
+    resetLight();
   }
   
-  comp = digitalRead(COMP_PIN); // Read current compressor status from sensor
+  comp = digitalRead(COMP_PIN);
   
-  if (comp) { // Check if compressor is on
-    resetEstimate(); // Reset the current estimate to zero
+  if (comp) {
+    resetEstimate();
   }
   
-  display.setCursor(48,10); // Set cursor position for current temperature value
-  display.print(temp, 1); // Print current temperature value with one decimal place
+  display.setCursor(48,10);
+  display.print(temp, 1);
   
-  display.setCursor(48,20); // Set cursor position for temperature threshold value
-  display.print(temp_threshold, 1); // Print temperature threshold value with one decimal place
+  display.setCursor(48,20);
+  display.print(temp_threshold, 1);
   
-  display.setCursor(48,30); // Set cursor position for estimated time value
-  display.print(temp_time, 0); // Print estimated time value with no decimal place
+  display.setCursor(48,30);
+  display.print(temp_time, 0);
   
-  display.display(); // Display the buffer to the screen
-  
-  temp_prev = temp; // Update previous temperature
-  
+  display.display();
 }
 
-// Function to read temperature from sensor and convert to degrees C
 float readTemp() {
-  int adc = analogRead(TEMP_PIN); // Read analog value from sensor
-  if (adc >= 4095) return 200.0; // Avoid division by zero
-  float vout = (float)adc / 4095.0 * VCC; // Convert analog value to voltage
-  float r = R0 * vout / (VCC - vout); // Calculate resistance of thermistor
-  // Standard Steinhart-Hart equation: 1/T = 1/T0 + 1/B * ln(R/R0)
+  int adc = analogRead(TEMP_PIN);
+  if (adc >= 4095) return 200.0;
+  float vout = (float)adc / 4095.0 * VCC;
+  float r = R0 * vout / (VCC - vout);
   float t = 1.0 / (1.0 / T0 + log(r / R0) / B) - T1;
-  return t; // Return temperature in degrees C
+  return t;
 }
 
-// Function to calculate logarithmic estimate based on extrapolation of current temperature over time
 float logEst(float rate) {
-  if (rate <= 0.00001) return 86400.0; // Temperature not rising or very slow
-  float t = (temp_threshold - temp) / rate; // Calculate time by linear extrapolation
+  if (rate <= 0.00001) return 86400.0;
+  float t = (temp_threshold - temp) / rate;
   if (t < 0) return 0;
   if (t > 86400.0) t = 86400.0;
-  return t * log_corr; // Apply adaptive correction factor
+  return t * log_corr;
 }
 
-// Function to add a sample to the array and shift the older samples if necessary
 void addSample(float s) {
-  if (sample_count < MAX_SAMPLES) { // Check if array is not full
-    sample_array[sample_count] = s; // Add sample to the end of array
-    sample_count++; // Increment sample count
+  if (sample_count < MAX_SAMPLES) {
+    sample_array[sample_count] = s;
+    sample_count++;
   }
-  else { // Array is full
-    for (int i = 0; i < MAX_SAMPLES - 1; i++) { // Loop through array except last element
-      sample_array[i] = sample_array[i+1]; // Shift element to the left by one position
+  else {
+    for (int i = 0; i < MAX_SAMPLES - 1; i++) {
+      sample_array[i] = sample_array[i+1];
     }
-    sample_array[MAX_SAMPLES - 1] = s; // Add sample to the last position of array
-    // Sample count remains unchanged
+    sample_array[MAX_SAMPLES - 1] = s;
   }
 }
 
-// Function to calculate the mean of the samples in the array
 float calcMean() {
-  float sum = 0.0; // Initialize sum to zero
-  for (int i = 0; i < sample_count; i++) { // Loop through array elements
-    sum += sample_array[i]; // Add element to sum
+  float sum = 0.0;
+  if (sample_count == 0) return 0;
+  for (int i = 0; i < sample_count; i++) {
+    sum += sample_array[i];
   }
-  
-return sum / sample_count; // Return mean of the samples in seconds
+  return sum / sample_count;
 }
 
-// Function to reset the light duration variables 
 void resetLight() {
-  light_start = 0; // Reset start time of light duration 
-  light_end = 0; // Reset end time of light duration 
-  light_total = 0; // Reset total light duration 
+  light_start = 0;
+  light_end = 0;
+  light_total = 0;
 }
 
-// Function to reset the current estimate to zero 
 void resetEstimate() {
-  temp_time = 0; // Reset estimated time to zero 
+  temp_time = 0;
 }

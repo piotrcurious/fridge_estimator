@@ -85,10 +85,16 @@ void loop() {
   temp = readTemp(); // Read current temperature value
   
   if (last_millis > 0) {
-    float instant_rate = (temp - temp_prev) / dt;
+    static float filtered_temp = 0;
+    if (filtered_temp == 0) filtered_temp = temp;
+    filtered_temp = filtered_temp * 0.9 + temp * 0.1;
+
+    float instant_rate = (filtered_temp - temp_prev) / dt;
     // Strong EMA to handle noisy sensor data
-    temp_rate = temp_rate * 0.995 + instant_rate * 0.005;
+    temp_rate = temp_rate * 0.999 + instant_rate * 0.001;
+    temp_prev = filtered_temp;
   } else {
+    temp_prev = temp;
     temp_rate = 0;
   }
   last_millis = current_m;
