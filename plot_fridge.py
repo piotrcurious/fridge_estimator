@@ -1,41 +1,41 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
+import sys
 
-def plot_data(csv_path, output_path, title):
-    if not os.path.exists(csv_path):
-        print(f"File {csv_path} not found.")
-        return
-    # Use lowercase as found in the CSV
-    df = pd.read_csv(csv_path)
+def plot_csv(csv_file, title, output_file):
+    df = pd.read_csv(csv_file)
 
     fig, ax1 = plt.subplots(figsize=(12, 6))
 
-    color = 'tab:red'
+    # Plot Temperature
+    ax1.plot(df['time'], df['temp'], color='tab:red', label='Air Temp (C)', alpha=0.8)
     ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Temperature (C)', color=color)
-    ax1.plot(df['time'], df['temp'], color=color, label='Actual Temp')
-    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylabel('Temperature (C)', color='tab:red')
+    ax1.tick_params(axis='y', labelcolor='tab:red')
     ax1.grid(True, linestyle='--', alpha=0.6)
 
+    # Plot Estimate on secondary axis
     ax2 = ax1.twinx()
-    color = 'tab:blue'
-    ax2.set_ylabel('Est. Time Remaining (s)', color=color)
-    # Filter out very large values for better plotting
-    df['est_plot'] = df['est'].apply(lambda x: x if x < 2000 else 2000)
-    ax2.plot(df['time'], df['est_plot'], color=color, alpha=0.7, label='Time Est')
-    ax2.tick_params(axis='y', labelcolor=color)
+    ax2.plot(df['time'], df['est'], color='tab:blue', label='Est. Remaining (s)', alpha=0.7)
+    ax2.set_ylabel('Est. Time Remaining (s)', color='tab:blue')
+    ax2.tick_params(axis='y', labelcolor='tab:blue')
+    ax2.set_ylim(-10, 2100)
 
-    if 'door' in df.columns:
-        # Plot door open events as small marks at the bottom
-        door_open = df[df['door'] == 1]
-        ax1.scatter(door_open['time'], [0]*len(door_open), color='orange', marker='s', s=10, label='Door Open', zorder=5)
+    # Shade Door Open periods
+    door_open = df[df['door'] == 1]
+    if not door_open.empty:
+        # Simplistic shading: just scatter at y=0
+        ax1.scatter(door_open['time'], [0]*len(door_open), color='orange', label='Door Open', marker='s', s=10)
 
     plt.title(title)
     fig.tight_layout()
-    plt.savefig(output_path)
-    print(f"Saved plot to {output_path}")
+    plt.savefig(output_file)
+    print(f"Saved plot to {output_file}")
 
 if __name__ == "__main__":
-    plot_data('simulator/data_v1_rev.csv', 'graph_v1_rev.png', 'Estimator 1 (Improved Smoothing & Learning)')
-    plot_data('simulator/data_v2_rev.csv', 'graph_v2_rev.png', 'Estimator 2 (Improved Smoothing & Physics)')
+    if len(sys.argv) < 3:
+        # Default for the two files
+        plot_csv('simulator/data_v1_rev2.csv', 'Estimator 1 (Adaptive) - Rev 2', 'graph_v1_rev2.png')
+        plot_csv('simulator/data_v2_rev2.csv', 'Estimator 2 (Physics) - Rev 2', 'graph_v2_rev2.png')
+    else:
+        plot_csv(sys.argv[1], sys.argv[2], sys.argv[3])

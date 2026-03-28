@@ -60,13 +60,23 @@ void updateDisplay();
 #include "../estimator_esp32.ino"
 #endif
 
+void log_csv(std::ostream& os) {
+    #ifdef USE_ESTIMATOR_2
+    float est = time_est;
+    #else
+    float est = temp_time;
+    #endif
+    os << current_millis/1000.0 << "," << temp << "," << est << "," << (fridge.door_open?1:0) << "," << (fridge.compressor_on?1:0) << std::endl;
+}
+
 int main(int argc, char** argv) {
     setup();
 
-    std::ofstream csv;
+    std::ostream* out = &std::cout;
+    std::ofstream file_out;
     if (argc > 1) {
-        csv.open(argv[1]);
-        csv << "time,temp,est,door,compressor" << std::endl;
+        file_out.open(argv[1]);
+        out = &file_out;
     }
 
     // Parameters for target threshold
@@ -76,66 +86,49 @@ int main(int argc, char** argv) {
     float target = temp_threshold;
     #endif
 
-    std::cout << "Starting Simulation. Target: " << target << "C" << std::endl;
+    std::cerr << "Starting Simulation. Target: " << target << "C" << std::endl;
+    *out << "time,temp,est,door,compressor" << std::endl;
 
     for (int cycle = 0; cycle < 5; ++cycle) {
         // 1. Cool down
         fridge.compressor_on = true;
-        while (fridge.current_temp > 2.0) {
+        while (fridge.t_air > 2.0) {
             current_millis += 1000;
             fridge.update(1.0);
             loop();
-            if (csv.is_open()) {
-                #ifdef USE_ESTIMATOR_2
-                float est = time_est;
-                #else
-                float est = temp_time;
-                #endif
-                csv << current_millis/1000.0 << "," << temp << "," << est << "," << (fridge.door_open?1:0) << "," << (fridge.compressor_on?1:0) << std::endl;
-            }
+            log_csv(*out);
         }
         fridge.compressor_on = false;
 
-        // 2. Open door 10-30s (variable)
+        // Stabilization
+        for (int i = 0; i < 60; ++i) {
+            current_millis += 1000;
+            fridge.update(1.0);
+            loop();
+            log_csv(*out);
+        }
+
+        // 2. Open door
         fridge.door_open = true;
-        int open_time = 10 + (cycle * 5);
+        int open_time = 20 + (cycle * 10);
         for (int i = 0; i < open_time; ++i) {
             current_millis += 1000;
             fridge.update(1.0);
             loop();
-            if (csv.is_open()) {
-                #ifdef USE_ESTIMATOR_2
-                float est = time_est;
-                #else
-                float est = temp_time;
-                #endif
-                csv << current_millis/1000.0 << "," << temp << "," << est << "," << (fridge.door_open?1:0) << "," << (fridge.compressor_on?1:0) << std::endl;
-            }
+            log_csv(*out);
         }
         fridge.door_open = false;
 
         // 3. Wait for threshold
-        while (temp < target + 0.5) { // Go slightly above threshold to trigger learning
+        unsigned long start_wait = current_millis;
+        while (temp < target + 0.2 && current_millis - start_wait < 7200000) {
             current_millis += 1000;
             fridge.update(1.0);
             loop();
-
-            if (csv.is_open()) {
-                #ifdef USE_ESTIMATOR_2
-                float est = time_est;
-                #else
-                float est = temp_time;
-                #endif
-                csv << current_millis/1000.0 << "," << temp << "," << est << "," << (fridge.door_open?1:0) << "," << (fridge.compressor_on?1:0) << std::endl;
-            }
-
-            if (temp >= target && temp < target + 0.02) {
-                 // std::cout << "Cycle " << cycle << " target reached." << std::endl;
-            }
+            log_csv(*out);
         }
     }
 
-    if (csv.is_open()) csv.close();
-    std::cout << "Simulation finished." << std::endl;
+    std::cerr << "Simulation finished." << std::endl;
     return 0;
 }

@@ -3,197 +3,136 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// Define OLED display size and address
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
-#define OLED_ADDR   0x3C  // OLED display I2C address
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR   0x3C
 
-// Create display object
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// Define pins for temperature sensor, light sensor and compressor sensor
-#define TEMP_PIN 34 // Analog pin for temperature sensor
-#define LIGHT_PIN 2 // Digital pin for light sensor
-#define COMP_PIN 4 // Digital pin for compressor sensor
+#define TEMP_PIN 34
+#define LIGHT_PIN 2
+#define COMP_PIN 4
 
-// Define constants for temperature conversion and estimation
-#define VCC 3.3 // Supply voltage for temperature sensor, in volts
-#define R0 10000 // Resistance of thermistor at 25 degrees C, in ohms
-#define B 3950 // Beta coefficient of thermistor, in K
-#define T0 298.15 // Reference temperature, in K
-#define T1 273.15 // Offset temperature, in K
-float log_corr = 1.0; // Adaptive correction factor for estimation
-#define NONLIN_CORR 0.1 // Nonlinear correction factor for estimation
+// Constants for temperature conversion
+#define VCC 3.3
+#define R0 10000
+#define B 3950
+#define T0 298.15
+#define T1 273.15
 
-// Define variables for temperature measurement and display
-float temp; // Current temperature, in degrees C
-float temp_prev; // Previous temperature, in degrees C
-float temp_rate; // Rate of temperature change, in degrees C per second
-float temp_threshold; // Temperature threshold for estimation, in degrees C
-float temp_time; // Estimated time until temperature reaches threshold, in seconds
+// Adaptive learning parameters
+float log_corr = 1.0;
+#define NONLIN_CORR 0.15
 
-// Define variables for light measurement and estimation
-bool light; // Current light status, true if on, false if off
-bool light_prev; // Previous light status, true if on, false if off
-unsigned long light_start; // Start time of light duration, in milliseconds
-unsigned long light_end; // End time of light duration, in milliseconds
-unsigned long light_total; // Total light duration, in milliseconds
-float light_factor; // Nonlinear factor for estimation based on light duration
+// State variables
+float temp;
+float temp_prev;
+float temp_rate = 0;
+float temp_threshold = 4.0;
+float temp_time = 0;
 
-// Define variables for learning algorithm and estimation
-float log_est; // Logarithmic estimate based on extrapolation of current temperature over time
-float nonlin_est; // Nonlinear estimate based on temperature loss occurring when the fridge is opened by user
-float est_weight; // Weighting factor for combining logarithmic and nonlinear estimates
+bool light;
+bool light_prev;
+unsigned long light_start;
+unsigned long light_total = 0;
+unsigned long last_door_closed = 0;
 
-// Define variables for reinforcement learning and refinement
-#define MAX_SAMPLES 10 // Maximum number of samples to store in the array
-int sample_count; // Current number of samples stored in the array
-float sample_array[MAX_SAMPLES]; // Array to store the samples of actual time until temperature reaches threshold
-float sample_mean; // Mean of the samples in the array
-
-// Define variables for compressor detection and reset
-bool comp; // Current compressor status, true if on, false if off
+bool comp;
 
 void setup() {
-  Serial.begin(115200); // Initialize serial communication
+  Serial.begin(115200);
+  pinMode(LIGHT_PIN, INPUT_PULLUP);
+  pinMode(COMP_PIN, INPUT);
   
-  pinMode(LIGHT_PIN, INPUT_PULLUP); // Set light pin as input with pull-up resistor
-  
-  pinMode(COMP_PIN, INPUT); // Set compressor pin as input
-  
-  if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) { // Initialize OLED display with I2C address 
-    Serial.println(F("SSD1306 allocation failed")); // Display error message if initialization fails
-    for(;;); // Don't proceed, loop forever
+  if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    for(;;);
   }
   
-  display.clearDisplay(); // Clear the display buffer
-  
-  display.setTextSize(1); // Set text size to 1
-  display.setTextColor(SSD1306_WHITE); // Set text color to white
-  
-  display.setCursor(0,0); // Set cursor position to top-left corner
-  display.println("Fridge Temperature"); // Print title
-  
-  display.setCursor(0,10); // Set cursor position below title
-  display.print("Current: "); // Print label for current temperature
-  
-  display.setCursor(64,10); // Set cursor position to the right of label
-  display.print("C"); // Print unit for current temperature
-  
-  display.setCursor(0,20); // Set cursor position below current temperature
-  display.print("Threshold: "); // Print label for temperature threshold
-  
-  display.setCursor(64,20); // Set cursor position to the right of label
-  display.print("C"); // Print unit for temperature threshold
-  
-  display.setCursor(0,30); // Set cursor position below temperature threshold
-  display.print("Time: "); // Print label for estimated time
-  
-  display.setCursor(64,30); // Set cursor position to the right of label
-  display.print("s"); // Print unit for estimated time
-  
-  display.display(); // Display the buffer to the screen
-  
-  temp_threshold = 4.0; // Set initial temperature threshold to 4 degrees C
-  
-  sample_count = 0; // Initialize sample count to zero
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
 }
 
 unsigned long last_millis = 0;
+float filtered_temp = -999;
+
 void loop() {
   unsigned long current_m = millis();
   float dt = (float)(current_m - last_millis) / 1000.0;
-  if (dt < 1.0 && last_millis > 0) return; // Run every 1s
-  
-  temp = readTemp(); // Read current temperature from sensor
-  
-  static float filtered_temp = 0;
-  if (filtered_temp == 0) filtered_temp = temp;
-  filtered_temp = filtered_temp * 0.9 + temp * 0.1;
+  if (dt < 1.0 && last_millis > 0) return;
+
+  temp = readTemp();
+  if (filtered_temp < -100) filtered_temp = temp;
+  filtered_temp = filtered_temp * 0.95 + temp * 0.05;
+
+  light = digitalRead(LIGHT_PIN) == LOW;
+  if (light != light_prev) {
+    if (light) {
+      light_start = millis();
+    } else {
+      light_total += (millis() - light_start);
+      last_door_closed = millis();
+    }
+    light_prev = light;
+  }
 
   if (last_millis > 0) {
-    // Smooth the rate calculation using the filtered temperature
     float instant_rate = (filtered_temp - temp_prev) / dt;
-    // EMA to handle noisy sensor data - slightly faster than before
-    temp_rate = temp_rate * 0.98 + instant_rate * 0.02;
+    comp = digitalRead(COMP_PIN);
+    bool stable = (!light && (millis() - last_door_closed > 45000));
+
+    if (stable && !comp) {
+      temp_rate = temp_rate * 0.99 + instant_rate * 0.01;
+    } else if (comp) {
+      temp_rate = temp_rate * 0.99;
+    }
+
     temp_prev = filtered_temp;
   } else {
     temp_prev = filtered_temp;
-    temp_rate = 0;
   }
   last_millis = current_m;
   
-  log_est = logEst(temp_rate); // Calculate logarithmic estimate based on extrapolation
-  
-  light = digitalRead(LIGHT_PIN) == LOW; // Read current light status (LOW = ON)
-  
-  if (light != light_prev) { // Check if light status has changed
-    if (light) { // Check if light is on
-      light_start = millis(); // Record start time of light duration
-    }
-    else { // Light is off
-      light_end = millis(); // Record end time of light duration
-      light_total += (light_end - light_start); // Update total light duration
-    }
-    light_prev = light; // Update previous light status
+  // Estimation
+  float base_time = 86400.0;
+  if (temp_rate > 0.0001) {
+    base_time = (temp_threshold - filtered_temp) / temp_rate;
   }
   
-  light_factor = 1.0 + (float)light_total / 1000.0 * NONLIN_CORR; // Calculate nonlinear factor based on light duration
+  float light_factor = 1.0 + (float)light_total / 1000.0 * NONLIN_CORR;
+  temp_time = (base_time / light_factor) * log_corr;
   
-  nonlin_est = log_est / light_factor; // Calculate nonlinear estimate based on door openings
+  if (temp_time < 0) temp_time = 0;
+  if (temp_time > 3600) temp_time = 3600;
+
+  // Learning
+  static float last_est_capture = 0;
+  static unsigned long capture_time = 0;
+  static bool captured_this_cycle = false;
   
-  est_weight = 0.5; // Default equal weighting
-  
-  temp_time = est_weight * log_est + (1 - est_weight) * nonlin_est; // Calculate estimated time by weighted average of estimates
-  
-  static float last_est_before_threshold = 0;
-  static unsigned long est_capture_time = 0;
-  // Capture a stable estimate when we are about 50% through the warming cycle
-  if (temp > (temp_threshold + 2.0) / 2.0 && temp < temp_threshold - 0.5 && temp_rate > 0.0001) {
-    last_est_before_threshold = temp_time;
-    est_capture_time = millis();
+  if (filtered_temp > 2.5 && filtered_temp < 3.0 && !captured_this_cycle && temp_rate > 0) {
+    last_est_capture = temp_time;
+    capture_time = millis();
+    captured_this_cycle = true;
   }
 
-  static unsigned long last_threshold_reached = 0;
-  if (temp >= temp_threshold && (last_threshold_reached == 0 || millis() - last_threshold_reached > 300000)) { // 5 min cooldown
-    if (last_threshold_reached > 0) {
-      float cycle_duration = (float)(millis() - last_threshold_reached) / 1000.0;
-      addSample(cycle_duration);
-      sample_mean = calcMean();
-
-      if (last_est_before_threshold > 0 && est_capture_time > last_threshold_reached) {
-        float actual_remaining = cycle_duration - (float)(est_capture_time - last_threshold_reached) / 1000.0;
-        if (actual_remaining > 30.0) {
-          float error_ratio = actual_remaining / last_est_before_threshold;
-          log_corr = log_corr * (0.9 + 0.1 * error_ratio); // Slightly more aggressive learning
-          log_corr = constrain(log_corr, 0.5, 2.0);
-          Serial.print("Actual remaining: "); Serial.println(actual_remaining);
-          Serial.print("Last estimate: "); Serial.println(last_est_before_threshold);
-          Serial.print("Adjusted log_corr to: "); Serial.println(log_corr);
-        }
+  static unsigned long last_threshold_time = 0;
+  if (filtered_temp >= temp_threshold && (millis() - last_threshold_time > 120000)) {
+    if (last_threshold_time > 0 && captured_this_cycle) {
+      float actual_remaining = (float)(millis() - capture_time) / 1000.0;
+      if (actual_remaining > 10.0 && last_est_capture > 10.0) {
+        float error_ratio = actual_remaining / last_est_capture;
+        log_corr = log_corr * (0.8 + 0.2 * error_ratio);
+        log_corr = constrain(log_corr, 0.5, 3.0);
       }
-      last_est_before_threshold = 0;
     }
-    last_threshold_reached = millis();
-    resetLight();
+    last_threshold_time = millis();
+    light_total = 0;
+    captured_this_cycle = false;
   }
   
-  comp = digitalRead(COMP_PIN);
-  
-  if (comp) {
-    resetEstimate();
-  }
-  
-  display.setCursor(48,10);
-  display.print(temp, 1);
-  
-  display.setCursor(48,20);
-  display.print(temp_threshold, 1);
-  
-  display.setCursor(48,30);
-  display.print(temp_time, 0);
-  
-  display.display();
+  updateDisplay();
 }
 
 float readTemp() {
@@ -201,46 +140,16 @@ float readTemp() {
   if (adc >= 4095) return 200.0;
   float vout = (float)adc / 4095.0 * VCC;
   float r = R0 * vout / (VCC - vout);
-  float t = 1.0 / (1.0 / T0 + log(r / R0) / B) - T1;
-  return t;
+  return 1.0 / (1.0 / T0 + log(r / R0) / B) - T1;
 }
 
-float logEst(float rate) {
-  if (rate <= 0.00001) return 86400.0;
-  float t = (temp_threshold - temp) / rate;
-  if (t < 0) return 0;
-  if (t > 86400.0) t = 86400.0;
-  return t * log_corr;
-}
-
-void addSample(float s) {
-  if (sample_count < MAX_SAMPLES) {
-    sample_array[sample_count] = s;
-    sample_count++;
-  }
-  else {
-    for (int i = 0; i < MAX_SAMPLES - 1; i++) {
-      sample_array[i] = sample_array[i+1];
-    }
-    sample_array[MAX_SAMPLES - 1] = s;
-  }
-}
-
-float calcMean() {
-  float sum = 0.0;
-  if (sample_count == 0) return 0;
-  for (int i = 0; i < sample_count; i++) {
-    sum += sample_array[i];
-  }
-  return sum / sample_count;
-}
-
-void resetLight() {
-  light_start = 0;
-  light_end = 0;
-  light_total = 0;
-}
-
-void resetEstimate() {
-  temp_time = 0;
+void updateDisplay() {
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("F-Estimator V1 (Adap)");
+  display.setCursor(0,15);
+  display.print("Temp: "); display.print(filtered_temp, 2);
+  display.setCursor(0,30);
+  display.print("Est: "); display.print(temp_time, 0); display.print(" s");
+  display.display();
 }
