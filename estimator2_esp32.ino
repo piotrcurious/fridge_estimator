@@ -19,8 +19,16 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define B 3950
 #define T0 298.15
 
+// Sliding window for rate estimation
+#define WINDOW_SIZE 60
+float temp_window[WINDOW_SIZE];
+unsigned long time_window[WINDOW_SIZE];
+int window_idx = 0;
+bool window_full = false;
+
 float temp;
 float filtered_temp = -999;
+float food_temp_est = -999;
 float temp_prev;
 float temp_rate = 0;
 float temp_target = 4.0;
@@ -51,8 +59,29 @@ void setup() {
   display.display();
 }
 
+float calculateRate() {
+  if (!window_full && window_idx < 2) return 0;
+  int count = window_full ? WINDOW_SIZE : window_idx;
+
+  float sum_x = 0, sum_y = 0, sum_xy = 0, sum_x2 = 0;
+  float start_time = (float)time_window[0] / 1000.0;
+
+  for (int i = 0; i < count; i++) {
+    float x = (float)time_window[i] / 1000.0 - start_time;
+    float y = temp_window[i];
+    sum_x += x;
+    sum_y += y;
+    sum_xy += x * y;
+    sum_x2 += x * x;
+  }
+
+  float denom = (count * sum_x2 - sum_x * sum_x);
+  if (abs(denom) < 0.0001) return 0;
+
+  return (count * sum_xy - sum_x * sum_y) / denom;
+}
+
 unsigned long last_millis = 0;
-float rate_ema = 0;
 
 void loop() {
   unsigned long current_m = millis();
@@ -60,8 +89,14 @@ void loop() {
   if (dt < 1.0 && last_millis > 0) return;
 
   temp = readTemp();
-  if (filtered_temp < -100) filtered_temp = temp;
-  filtered_temp = filtered_temp * 0.92 + temp * 0.08;
+  if (filtered_temp < -100) {
+      filtered_temp = temp;
+      food_temp_est = temp;
+  }
+  filtered_temp = filtered_temp * 0.9 + temp * 0.1;
+
+  float food_alpha = light ? 0.005 : 0.02;
+  food_temp_est = food_temp_est * (1.0 - food_alpha) + temp * food_alpha;
 
   light = digitalRead(LIGHT_PIN) == LOW;
   if (light != light_prev) {
@@ -69,7 +104,7 @@ void loop() {
       light_start = millis();
     } else {
       unsigned long duration = millis() - light_start;
-      door_penalty_accum += 0.085 * sqrt((float)duration / 1000.0);
+      door_penalty_accum += 0.09 * sqrt((float)duration / 1000.0);
       door_closed_time = millis();
     }
     light_prev = light;
@@ -81,34 +116,44 @@ void loop() {
   }
   comp_prev = comp;
 
-  if (last_millis > 0) {
-    float instant_rate = (filtered_temp - temp_prev) / dt;
+  // Update sliding window
+  bool door_recently_closed = (millis() - door_closed_time < 45000);
+  bool stable = (!light && !door_recently_closed);
 
-    // Stability logic: door closed for 60s, and no compressor
-    bool stable = (!light && (millis() - door_closed_time > 60000));
-
-    if (stable && !comp) {
-      rate_ema = rate_ema * 0.994 + instant_rate * 0.006;
-      temp_rate = rate_ema;
-    } else if (comp) {
-      rate_ema = rate_ema * 0.94;
-      temp_rate = 0;
+  if (stable && !comp) {
+    temp_window[window_idx] = filtered_temp;
+    time_window[window_idx] = current_m;
+    window_idx++;
+    if (window_idx >= WINDOW_SIZE) {
+      window_idx = 0;
+      window_full = true;
     }
-    temp_prev = filtered_temp;
+
+    int count = window_full ? WINDOW_SIZE : window_idx;
+    if (count > 10) {
+      temp_rate = calculateRate();
+    }
   } else {
-    temp_prev = filtered_temp;
-    temp_rate = 0;
+    window_idx = 0;
+    window_full = false;
+    if (comp) {
+        temp_rate = 0;
+    }
   }
-  last_millis = current_m;
   
-  // Estimation: (Distance to target / Rate) - Factor for accumulated door heat
+  last_millis = current_m;
+
+  // Estimation
   if (temp_rate > 0.0001) {
-    float effective_dist = (temp_target - filtered_temp) - door_penalty_accum;
+    float decay = exp(-(float)(millis() - door_closed_time) / 300000.0);
+    float active_penalty = door_penalty_accum * decay;
+
+    float effective_dist = (temp_target - food_temp_est) - active_penalty;
     if (effective_dist < 0) effective_dist = 0;
     
     time_est = effective_dist / temp_rate;
   } else {
-    time_est = 3600;
+    if (comp) time_est = 3600;
   }
 
   if (time_est < 0) time_est = 0;
@@ -122,9 +167,7 @@ float readTemp() {
   if (adc >= 4095) return 200.0;
   float vout = adc * VCC / 4095.0;
   float r = R0 * vout / (VCC - vout);
-  // Steinhart-Hart B-parameter equation
-  float t = 1.0 / (1.0 / 298.15 + log(r / R0) / B) - 273.15;
-  return t;
+  return 1.0 / (1.0 / 298.15 + log(r / R0) / B) - 273.15;
 }
 
 void updateDisplay() {
