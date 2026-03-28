@@ -109,11 +109,22 @@ void setup() {
   sample_count = 0; // Initialize sample count to zero
 }
 
+unsigned long last_millis = 0;
 void loop() {
+  unsigned long current_m = millis();
+  float dt = (float)(current_m - last_millis) / 1000.0;
+  if (dt < 1.0 && last_millis > 0) return; // Run at 1Hz
   
   temp = readTemp(); // Read current temperature from sensor
   
-  temp_rate = (temp - temp_prev) / (millis() / 1000.0); // Calculate rate of temperature change
+  if (last_millis > 0) {
+    // Smooth the rate calculation
+    float instant_rate = (temp - temp_prev) / dt;
+    temp_rate = temp_rate * 0.8 + instant_rate * 0.2;
+  } else {
+    temp_rate = 0;
+  }
+  last_millis = current_m;
   
   log_est = logEst(temp_rate); // Calculate logarithmic estimate based on extrapolation
   
@@ -132,14 +143,18 @@ void loop() {
   
   light_factor = 1.0 + (float)light_total / 1000.0 * NONLIN_CORR; // Calculate nonlinear factor based on light duration
   
-  nonlin_est = temp_threshold * light_factor; // Calculate nonlinear estimate based on temperature loss
+  nonlin_est = log_est / light_factor; // Calculate nonlinear estimate based on door openings
   
   est_weight = LOG_CORR / (LOG_CORR + NONLIN_CORR); // Calculate weighting factor for combining estimates
   
   temp_time = est_weight * log_est + (1 - est_weight) * nonlin_est; // Calculate estimated time by weighted average of estimates
   
+  static unsigned long last_threshold_reached = 0;
   if (temp >= temp_threshold) { // Check if temperature has reached threshold
-    addSample(millis() / 1000.0); // Add the actual time to the sample array
+    if (last_threshold_reached > 0) {
+      addSample((millis() - last_threshold_reached) / 1000.0); // Add cycle duration to sample array
+    }
+    last_threshold_reached = millis();
     sample_mean = calcMean(); // Calculate the mean of the samples in the array
     sample_error = temp_time - sample_mean; // Calculate the error between the estimated time and the mean of the samples
     adjustWeight(sample_error); // Adjust the weighting factor based on the error
@@ -172,17 +187,20 @@ void loop() {
 // Function to read temperature from sensor and convert to degrees C
 float readTemp() {
   int adc = analogRead(TEMP_PIN); // Read analog value from sensor
+  if (adc >= 4095) return 200.0; // Avoid division by zero
   float vout = (float)adc / 4095.0 * VCC; // Convert analog value to voltage
   float r = R0 * vout / (VCC - vout); // Calculate resistance of thermistor
-  float t = B / log(r / R0) - T1; // Calculate temperature of thermistor
+  // Standard Steinhart-Hart equation: 1/T = 1/T0 + 1/B * ln(R/R0)
+  float t = 1.0 / (1.0 / T0 + log(r / R0) / B) - T1;
   return t; // Return temperature in degrees C
 }
 
 // Function to calculate logarithmic estimate based on extrapolation of current temperature over time
 float logEst(float rate) {
+  if (rate <= 0.00001) return 86400.0; // Temperature not rising or very slow
   float t = (temp_threshold - temp) / rate; // Calculate time by linear extrapolation
-  float l = pow(LOG_BASE, t * LOG_CORR); // Apply logarithmic correction factor
-  return l; // Return logarithmic estimate in seconds
+  if (t < 0) return 0;
+  return t; // Return estimated time in seconds
 }
 
 // Function to add a sample to the array and shift the older samples if necessary

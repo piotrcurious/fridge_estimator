@@ -74,13 +74,23 @@ void setup() {
   
 }
 
+unsigned long last_millis = 0;
 void loop() {
-  
+  unsigned long current_m = millis();
+  float dt = (float)(current_m - last_millis) / 1000.0;
+  if (dt < 1.0 && last_millis > 0) return; // Run at 1Hz
+
   temp_prev = temp; // Store previous temperature value
   
   temp = readTemp(); // Read current temperature value
   
-  temp_rate = (temp - temp_prev) / (millis() / 1000.0); // Calculate rate of change of temperature
+  if (last_millis > 0) {
+    float instant_rate = (temp - temp_prev) / dt;
+    temp_rate = temp_rate * 0.8 + instant_rate * 0.2;
+  } else {
+    temp_rate = 0;
+  }
+  last_millis = current_m;
   
   Serial.print("Temperature: "); 
   Serial.print(temp);
@@ -160,6 +170,8 @@ void loop() {
     
   }
   
+  time_est = estimateTime();
+
   if (millis() - display_last > display_interval) { // If display update interval has passed
     
     updateDisplay(); // Update the display with current values
@@ -172,8 +184,10 @@ void loop() {
 float readTemp() {
   
   int adc = analogRead(TEMP_PIN); // Read analog value from sensor
+  if (adc >= 4095) return 200.0;
   float vout = adc * VCC / 4095.0; // Convert analog value to voltage
-  float r = R0 * VCC / vout - R0; // Calculate resistance of thermistor
+  // vout = VCC * r / (R0 + r) => vout(R0+r) = VCC*r => vout*R0 = r(VCC-vout) => r = R0*vout/(VCC-vout)
+  float r = R0 * vout / (VCC - vout); // Calculate resistance of thermistor
   float t = 1.0 / (1.0 / T0 + log(r / R0) / B) - 273.15; // Calculate temperature in degrees C
   
   return t; // Return temperature value
@@ -198,9 +212,9 @@ float estimateTime() {
   
   float time = 0; // Initialize time variable
   
-  // Use a simple logarithmic function to estimate time based on current and estimated temperature
-  // This can be improved with more data and a better model
-  time = -10 * log(temp_est - temp_target);
+  if (temp_rate <= 0.00001) return 86400.0;
+  time = (temp_target - temp_est) / temp_rate;
+  if (time < 0) return 0;
   
   return time; // Return time value
   
