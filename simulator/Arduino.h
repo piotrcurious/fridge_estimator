@@ -19,20 +19,6 @@
 
 typedef uint8_t byte;
 
-// Forward declarations for functions in .ino
-float readTemp();
-float logEst(float rate);
-void addSample(float s);
-float calcMean();
-void adjustWeight(float error);
-void resetLight();
-void resetEstimate();
-void fitCorr();
-void correctArray(float corr);
-float estimateTempLoss();
-float estimateTime();
-void updateDisplay();
-
 // Mock Serial
 class MockSerial {
 public:
@@ -86,6 +72,7 @@ void delay(unsigned long ms);
 using std::log;
 using std::pow;
 using std::exp;
+using std::sqrt;
 
 template <typename T, typename T2, typename T3>
 T constrain(T x, T2 a, T3 b) {

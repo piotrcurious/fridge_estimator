@@ -86,7 +86,8 @@ void loop() {
   
   if (last_millis > 0) {
     float instant_rate = (temp - temp_prev) / dt;
-    temp_rate = temp_rate * 0.8 + instant_rate * 0.2;
+    // Strong EMA to handle noisy sensor data
+    temp_rate = temp_rate * 0.995 + instant_rate * 0.005;
   } else {
     temp_rate = 0;
   }
@@ -101,27 +102,13 @@ void loop() {
   light = digitalRead(LIGHT_PIN) == LOW; // Read current light status (inverted logic)
   
   if (light && !light_prev) { // If light is turned on
-    
     light_start = millis(); // Record start time of light on
-    
     Serial.println("Light on");
-    
+  }
+
+  if (light) {
     temp_loss = estimateTempLoss(); // Estimate temperature loss due to opening the fridge
-    
-    Serial.print("Estimated temperature loss: ");
-    Serial.print(temp_loss);
-    Serial.println(" C");
-    
     temp_est = temp + temp_loss; // Adjust estimated temperature with temperature loss
-    
-    time_est = estimateTime(); // Estimate time until target temperature is reached
-    
-    Serial.print("Estimated time: ");
-    Serial.print(time_est);
-    Serial.println(" s");
-    
-    updateDisplay(); // Update the display with new values
-    
   }
   
   if (!light && light_prev) { // If light is turned off
@@ -199,9 +186,12 @@ float estimateTempLoss() {
   
   float loss = 0; // Initialize loss variable
   
-  // Use a simple linear function to estimate loss based on light duration
-  // This can be improved with more data and a better model
-  loss = 0.01 * light_duration / 1000.0;
+  // Use the current duration if the door is open, otherwise use the last duration
+  unsigned long current_duration = light ? (millis() - light_start) : light_duration;
+
+  // Non-linear loss: door opening has a big initial impact then tapers
+  // loss = K * sqrt(duration)
+  loss = 0.05 * sqrt((float)current_duration / 1000.0);
   
   return loss; // Return loss value
   
@@ -215,6 +205,7 @@ float estimateTime() {
   if (temp_rate <= 0.00001) return 86400.0;
   time = (temp_target - temp_est) / temp_rate;
   if (time < 0) return 0;
+  if (time > 86400.0) time = 86400.0;
   
   return time; // Return time value
   

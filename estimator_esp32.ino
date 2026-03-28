@@ -22,8 +22,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define B 3950 // Beta coefficient of thermistor, in K
 #define T0 298.15 // Reference temperature, in K
 #define T1 273.15 // Offset temperature, in K
-#define LOG_BASE 2.7182818284590452353602874713527 // Base of natural logarithm
-#define LOG_CORR 0.9 // Logarithmic correction factor for estimation
+float log_corr = 1.0; // Adaptive correction factor for estimation
 #define NONLIN_CORR 0.1 // Nonlinear correction factor for estimation
 
 // Define variables for temperature measurement and display
@@ -51,18 +50,9 @@ float est_weight; // Weighting factor for combining logarithmic and nonlinear es
 int sample_count; // Current number of samples stored in the array
 float sample_array[MAX_SAMPLES]; // Array to store the samples of actual time until temperature reaches threshold
 float sample_mean; // Mean of the samples in the array
-float sample_error; // Error between the estimated time and the mean of the samples
 
 // Define variables for compressor detection and reset
 bool comp; // Current compressor status, true if on, false if off
-
-// Define variables for additional correction based on fitting of temperature drop 
-float temp_quarter; // Temperature at quarter of the estimated time 
-float temp_drop; // Temperature drop from current to quarter 
-float fit_slope; // Slope of the linear fit of temperature drop 
-float fit_intercept; // Intercept of the linear fit of temperature drop 
-float fit_error; // Error between the actual and fitted temperature drop 
-float fit_corr; // Additional correction factor based on fitting error 
 
 void setup() {
   Serial.begin(115200); // Initialize serial communication
@@ -113,14 +103,15 @@ unsigned long last_millis = 0;
 void loop() {
   unsigned long current_m = millis();
   float dt = (float)(current_m - last_millis) / 1000.0;
-  if (dt < 1.0 && last_millis > 0) return; // Run at 1Hz
+  if (dt < 1.0 && last_millis > 0) return; // Run every 1s
   
   temp = readTemp(); // Read current temperature from sensor
   
   if (last_millis > 0) {
     // Smooth the rate calculation
     float instant_rate = (temp - temp_prev) / dt;
-    temp_rate = temp_rate * 0.8 + instant_rate * 0.2;
+    // VERY Strong EMA to handle noisy sensor data
+    temp_rate = temp_rate * 0.995 + instant_rate * 0.005;
   } else {
     temp_rate = 0;
   }
@@ -128,7 +119,7 @@ void loop() {
   
   log_est = logEst(temp_rate); // Calculate logarithmic estimate based on extrapolation
   
-  light = digitalRead(LIGHT_PIN); // Read current light status from sensor
+  light = digitalRead(LIGHT_PIN) == LOW; // Read current light status (LOW = ON)
   
   if (light != light_prev) { // Check if light status has changed
     if (light) { // Check if light is on
@@ -145,22 +136,44 @@ void loop() {
   
   nonlin_est = log_est / light_factor; // Calculate nonlinear estimate based on door openings
   
-  est_weight = LOG_CORR / (LOG_CORR + NONLIN_CORR); // Calculate weighting factor for combining estimates
+  est_weight = 0.5; // Default equal weighting
   
   temp_time = est_weight * log_est + (1 - est_weight) * nonlin_est; // Calculate estimated time by weighted average of estimates
   
+  static float last_est_before_threshold = 0;
+  static unsigned long est_capture_time = 0;
+  // Capture a stable estimate when we are about 50% through the warming cycle
+  // Only capture if we have a positive and non-trivial rate
+  if (temp > (temp_threshold + 2.0) / 2.0 && temp < temp_threshold - 0.5 && temp_rate > 0.0001) {
+    last_est_before_threshold = temp_time;
+    est_capture_time = millis();
+  }
+
   static unsigned long last_threshold_reached = 0;
-  if (temp >= temp_threshold) { // Check if temperature has reached threshold
+  if (temp >= temp_threshold && (last_threshold_reached == 0 || millis() - last_threshold_reached > 300000)) { // Ensure it's a new event (5 min cooldown)
     if (last_threshold_reached > 0) {
-      addSample((millis() - last_threshold_reached) / 1000.0); // Add cycle duration to sample array
+      float cycle_duration = (float)(millis() - last_threshold_reached) / 1000.0;
+      addSample(cycle_duration); // Add cycle duration to sample array
+      sample_mean = calcMean(); // Calculate the mean of the samples in the array
+
+      // Adapt the correction factor based on the error
+      // Use the last estimated time before reaching threshold for comparison
+      if (last_est_before_threshold > 0 && est_capture_time > last_threshold_reached) {
+        float actual_remaining = cycle_duration - (float)(est_capture_time - last_threshold_reached) / 1000.0;
+        if (actual_remaining > 30.0) { // Only adapt if significant time was remaining
+          float error_ratio = actual_remaining / last_est_before_threshold;
+          // Very conservative adjustment to avoid oscillations
+          log_corr = log_corr * (0.95 + 0.05 * error_ratio);
+          log_corr = constrain(log_corr, 0.5, 2.0);
+          Serial.print("Actual remaining: "); Serial.println(actual_remaining);
+          Serial.print("Last estimate: "); Serial.println(last_est_before_threshold);
+          Serial.print("Adjusted log_corr to: "); Serial.println(log_corr);
+        }
+      }
+      last_est_before_threshold = 0; // Reset for next cycle
     }
     last_threshold_reached = millis();
-    sample_mean = calcMean(); // Calculate the mean of the samples in the array
-    sample_error = temp_time - sample_mean; // Calculate the error between the estimated time and the mean of the samples
-    adjustWeight(sample_error); // Adjust the weighting factor based on the error
     resetLight(); // Reset the light duration variables
-    fitCorr(); // Apply additional correction based on fitting of temperature drop 
-    correctArray(fit_corr); // Correct the array elements based on additional correction factor 
   }
   
   comp = digitalRead(COMP_PIN); // Read current compressor status from sensor
@@ -200,7 +213,8 @@ float logEst(float rate) {
   if (rate <= 0.00001) return 86400.0; // Temperature not rising or very slow
   float t = (temp_threshold - temp) / rate; // Calculate time by linear extrapolation
   if (t < 0) return 0;
-  return t; // Return estimated time in seconds
+  if (t > 86400.0) t = 86400.0;
+  return t * log_corr; // Apply adaptive correction factor
 }
 
 // Function to add a sample to the array and shift the older samples if necessary
@@ -228,18 +242,6 @@ float calcMean() {
 return sum / sample_count; // Return mean of the samples in seconds
 }
 
-// Function to adjust the weighting factor based on the error between the estimated time and the mean of the samples
-void adjustWeight(float error) {
-  if (error > 0) { // Check if estimated time is too high
-    est_weight -= error / temp_time; // Decrease weighting factor by error ratio
-    est_weight = constrain(est_weight, 0, 1); // Constrain weighting factor between 0 and 1
-  }
-  else if (error < 0) { // Check if estimated time is too low
-    est_weight -= error / temp_time; // Increase weighting factor by error ratio
-    est_weight = constrain(est_weight, 0, 1); // Constrain weighting factor between 0 and 1
-  }
-}
-
 // Function to reset the light duration variables 
 void resetLight() {
   light_start = 0; // Reset start time of light duration 
@@ -250,25 +252,4 @@ void resetLight() {
 // Function to reset the current estimate to zero 
 void resetEstimate() {
   temp_time = 0; // Reset estimated time to zero 
-}
-
-// Function to apply additional correction based on fitting of temperature drop 
-void fitCorr() {
-  
-temp_quarter = temp - temp_rate * temp_time /4.0; // Calculate temperature at quarter of the estimated time 
-temp_drop = temp - temp_quarter; // Calculate temperature drop from current to quarter 
-fit_slope = temp_drop / (temp_time /4.0); // Calculate slope of the linear fit of temperature drop 
-fit_intercept = temp - fit_slope * temp_time; // Calculate intercept of the linear fit of temperature drop 
-fit_error = temp_threshold - (fit_slope * temp_time + fit_intercept); // Calculate error between the actual and fitted temperature drop 
-fit_corr = fit_error / temp_time; // Calculate additional correction factor based on fitting error 
-
-}
-
-// Function to correct the array elements based on additional correction factor 
-void correctArray(float corr) {
-  
-for (int i = 0; i < sample_count; i++) { // Loop through array elements 
-sample_array[i] += corr * sample_array[i]; // Correct element by adding correction factor times element 
-}
-
 }
