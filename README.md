@@ -1,61 +1,54 @@
-# Fridge Temperature Estimator
+# Adaptive Physics-Based Fridge Unfreeze Time Estimator
 
-This project provides ESP32-based Arduino code to estimate the time remaining until a fridge reaches a critical temperature threshold (e.g., 4°C). It includes two variants of the estimation logic and a comprehensive C++ simulation environment for testing and validation.
+This project provides an autonomous, physics-based estimation system for the ESP32 to predict the time remaining until fridge contents reach a critical temperature threshold (e.g., 4°C). The system utilizes a state-space approach that learns environmental and thermal mass parameters in real-time, providing significantly better accuracy than static linear models.
 
-## Estimator Variants
+## Key Features (V20 Architecture)
 
-### 1. Adaptive Learning Variant (`estimator_esp32.ino`)
-Uses a linear extrapolation of the temperature rate-of-change combined with an adaptive correction factor.
-- **Internal Proxy:** Estimates "Food Temperature" using a very slow-tracking filter to ignore transient air temperature spikes during door openings.
-- **Rate Estimation:** Employs a 60-second Sliding Window Linear Regression (Least Squares) for a stable rate-of-change calculation.
-- **Adaptive Learning:** After each warming cycle, it compares the predicted time with the actual elapsed time to adjust a `log_corr` scaling factor.
-- **Stability:** Specifically optimized to minimize "jumpiness" in the user interface.
+- **Newton's Law of Warming:** Uses a logarithmic prediction model for physically accurate time-to-target estimation.
+- **Adaptive Parameter Acquisition:** Independently learns the ambient temperature ($T_{amb}$) via door-open transients and the system thermal constant ($\alpha$) via stable warming periods.
+- **Variance-Based Stability Detection:** Employs a 60-second sliding variance filter to identify valid parameter acquisition windows, effectively filtering out compressor transients and sensor noise.
+- **Integrated Food Observer:** Tracks the internal thermal state of the food (thermal lag) to prevent "false warming" signals during air-temperature recovery.
+- **Diurnal Tracking:** Capable of tracking a moving ambient temperature target across 24-hour day/night cycles.
 
-### 2. Physical Model Variant (`estimator2_esp32.ino`)
-Uses a physics-inspired model to estimate internal temperature shifts.
-- **Non-linear Door Loss:** Models air exchange during door openings using a square-root duration model and exponential decay of the thermal penalty.
-- **Internal Proxy:** Also uses the slow-tracking Food Temperature proxy for distance-to-threshold calculations.
-- **Rate Estimation:** Uses the same 60-second sliding window regression as V1 for consistency.
+## Performance Results (24h Diurnal Complex Benchmark)
 
-## Simulation Environment
+The adaptive V20 estimator was benchmarked against a static physical model in a rigorous 24-hour stochastic simulation with sinusoidal ambient temperature shifts:
 
-A custom C++ simulator is provided in the `simulator/` directory to test the logic without hardware.
+| Scenario | Adaptive MAE | Improvement vs Static |
+| :--- | :--- | :--- |
+| **Heavy Food Mass (2.0x)** | 2978s | **74% Reduction in Error** |
+| **Cold Environment (15C)** | 2394s | **69% Reduction in Error** |
+| **Baseline (25C + 5C Swing)** | 3979s | **13% Reduction in Error** |
 
-### Physics Simulation Features
-- **Thermal Mass & Insulation:** Models the heat capacity of the fridge contents and heat leakage through walls.
-- **Sensor Noise:** Simulates realistic analog-to-digital converter (ADC) noise.
-- **Door Events:** Randomly simulates door openings and their thermal impact.
-- **Compressor Cycle:** Simulates the cooling phase when the compressor is active.
+### Visualizations
+![MAE Comparison](mae_comparison_24h.png)
+*Figure 1: MAE reduction across complex scenarios.*
 
-### Running the Tests
-To build and run the simulation:
+![Heavy Mass Analysis](analysis_heavy_24h.png)
+*Figure 2: V20 performance in the Heavy Mass scenario. Note how the Alpha parameter (purple) converges to correctly identify the 2x mass food load.*
+
+## Simulation & Testing Infrastructure
+
+A custom C++ mock Arduino and physics environment is located in the `simulator/` directory.
+
+### Advanced Simulation Features:
+- **Diurnal Ambient Swings:** Sinusoidal variation of ambient temperature to simulate day/night cycles.
+- **Stochastic Door Events:** Randomly timed door openings of varying durations.
+- **Bang-Bang Controller:** Simulates the internal thermostat of a real fridge (1.5°C to 4.5°C).
+- **Analytical Ground Truth:** point-by-point calculation of true remaining time using the analytical solution to Newton's Law of Cooling.
+
+### Running Benchmarks
 ```bash
-cd simulator
-make
-./test_v1  # Runs Estimator 1
-./test_v2  # Runs Estimator 2
+# Run the 24h complex test suite
+python3 run_extensive_tests.py
+
+# Generate analysis graphs
+python3 plot_detailed.py
 ```
-This generates `data_v1_rev.csv` and `data_v2_rev.csv`.
-
-### Visualization
-The `plot_fridge.py` script generates performance graphs:
-```bash
-python3 plot_fridge.py
-```
-
-## Performance Results
-
-### Estimator 1: Adaptive Learning
-![Estimator 1 Results](graph_v1_rev.png)
-*Figure 1: Final performance of the Adaptive variant. The Food Proxy logic ensures the estimate (blue) remains stable even when the air temperature (red) spikes due to door events (orange marks).*
-
-### Estimator 2: Physical Model
-![Estimator 2 Results](graph_v2_rev.png)
-*Figure 2: Final performance of the Physics-based variant. The door penalty causes a sharper drop in estimated time during openings, but the Food Proxy maintains overall stability.*
 
 ## Hardware Requirements
 - ESP32 Development Board
-- NTC Thermistor (10k) with 10k resistor divider on GPIO 34
-- Digital light sensor (Door status) on GPIO 2
+- NTC Thermistor (10k) on GPIO 34
+- Digital light sensor (Door) on GPIO 2
 - Digital compressor sensor on GPIO 4
 - SSD1306 OLED Display (I2C)
