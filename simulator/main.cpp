@@ -81,17 +81,12 @@ void log_csv(std::ostream& os) {
        << debug_alpha << std::endl;
 }
 
-struct Event {
-    double time;
-    bool door_open;
-    bool compressor_on;
-};
-
 int main(int argc, char** argv) {
     double ambient = 25.0;
     double mass_ratio = 1.0;
+    double swing = 0.0;
     std::string out_path = "";
-    double sim_duration = 86400.0; // 24 hours by default
+    double sim_duration = 86400.0;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -103,10 +98,12 @@ int main(int argc, char** argv) {
             out_path = argv[++i];
         } else if (arg == "--duration" && i + 1 < argc) {
             sim_duration = std::stod(argv[++i]);
+        } else if (arg == "--swing" && i + 1 < argc) {
+            swing = std::stod(argv[++i]);
         }
     }
 
-    fridge.setParams(ambient, mass_ratio);
+    fridge.setParams(ambient, mass_ratio, swing);
     setup();
 
     std::ostream* out = &std::cout;
@@ -122,14 +119,12 @@ int main(int argc, char** argv) {
     std::uniform_real_distribution<double> door_chance(0, 1);
     std::uniform_real_distribution<double> door_duration(5, 60);
 
-    double next_door_event = 3600.0; // First door event at 1 hour
+    double next_door_event = 3600.0;
 
     for (double t = 0; t < sim_duration; t += 1.0) {
-        // Simple bang-bang controller for the fridge
         if (fridge.t_air > 4.5) fridge.compressor_on = true;
         if (fridge.t_air < 1.5) fridge.compressor_on = false;
 
-        // Random door events
         if (t >= next_door_event) {
             fridge.door_open = true;
             double duration = door_duration(event_gen);
@@ -141,7 +136,6 @@ int main(int argc, char** argv) {
                 t += 1.0;
             }
             fridge.door_open = false;
-            // Next event in 30 mins to 4 hours
             std::uniform_real_distribution<double> next_event_dist(1800, 14400);
             next_door_event = t + next_event_dist(event_gen);
         }

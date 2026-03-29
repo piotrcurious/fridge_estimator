@@ -33,6 +33,12 @@ float food_temp_est = -999;
 float temp_threshold = 4.0;
 float temp_time = 3600;
 
+// Variance Calculation
+#define VAR_SIZE 60
+float rate_history[VAR_SIZE];
+int var_idx = 0;
+bool var_full = false;
+
 // Filters
 #define MEDIAN_SIZE 11
 float median_buffer[MEDIAN_SIZE];
@@ -81,6 +87,7 @@ void setup() {
   display.display();
   for(int i=0; i<WINDOW_SIZE; i++) { temp_window[i] = 0; time_window[i] = 0; }
   for(int i=0; i<MEDIAN_SIZE; i++) median_buffer[i] = 2.0;
+  for(int i=0; i<VAR_SIZE; i++) rate_history[i] = 0;
 }
 
 float calculateRate(int samples) {
@@ -114,7 +121,7 @@ void loop() {
   }
   filtered_temp = filtered_temp * 0.9 + temp * 0.1;
 
-  // Food Observer
+  // Food Observer - matches system alpha
   float alpha_coup = alpha_sys * 1.5;
   if (comp) alpha_coup *= 2.0;
   food_temp_est += (filtered_temp - food_temp_est) * alpha_coup * dt;
@@ -139,23 +146,29 @@ void loop() {
           }
       }
   } else if (!comp) {
-      // Dynamic Stability Detection
-      // We look at the 100-sample rate to see if the air temp is truly warming (stable)
-      float rate_long = calculateRate(100);
-      float rate_short = calculateRate(30);
+      // Stability Detection via Rate Variance
+      float r = calculateRate(30);
+      rate_history[var_idx] = r;
+      var_idx++; if (var_idx >= VAR_SIZE) { var_idx = 0; var_full = true; }
 
-      // If the short-term and long-term rates are consistent and positive, we are in a stable warming phase
-      bool stable_warming = (rate_long > 1e-6 && abs(rate_long - rate_short) < 0.1 * rate_long);
-      bool recovery = (millis() - last_door_closed < 300000 || millis() - last_comp_off < 300000);
+      if (var_full) {
+          float sum = 0, sq_sum = 0;
+          for(int i=0; i<VAR_SIZE; i++) { sum += rate_history[i]; sq_sum += rate_history[i]*rate_history[i]; }
+          float mean = sum / VAR_SIZE;
+          float var = (sq_sum / VAR_SIZE) - (mean * mean);
 
-      if (stable_warming && !recovery) {
-          float delta_T = ambient_est - filtered_temp;
-          if (delta_T > 2.0) {
-              float alpha_inst = rate_long / delta_T;
-              if (alpha_inst > 1e-7 && alpha_inst < 1e-4) {
-                  float k = alpha_acquired ? 0.005 : 0.1;
-                  alpha_sys = alpha_sys * (1.0 - k) + alpha_inst * k;
-                  alpha_acquired = true;
+          bool stable = (mean > 1e-6 && var < 1e-9);
+          bool recovery = (millis() - last_door_closed < 300000 || millis() - last_comp_off < 300000);
+
+          if (stable && !recovery) {
+              float delta_T = ambient_est - filtered_temp;
+              if (delta_T > 2.0) {
+                  float alpha_inst = mean / delta_T;
+                  if (alpha_inst > 1e-7 && alpha_inst < 1e-4) {
+                      float k = alpha_acquired ? 0.005 : 0.1;
+                      alpha_sys = alpha_sys * (1.0 - k) + alpha_inst * k;
+                      alpha_acquired = true;
+                  }
               }
           }
       }
@@ -204,7 +217,7 @@ float readTemp() {
 void updateDisplay() {
   display.clearDisplay();
   display.setCursor(0,0);
-  display.println("Phys-Adaptive v19");
+  display.println("Phys-Adaptive v20");
   display.setCursor(0,12);
   display.print("Asys: "); display.print(alpha_sys * 1e6, 2);
   display.setCursor(0,24);
