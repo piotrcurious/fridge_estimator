@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <vector>
 
 MockSerial Serial;
 MockWire Wire;
@@ -37,11 +38,10 @@ void delay(unsigned long ms) {
     current_millis += ms;
 }
 
-// Prototypes for functions that might be used in .ino
+// Prototypes
 void setup();
 void loop();
 
-// Define needed headers for the .ino to satisfy include guards
 #ifndef Wire_h
 #define Wire_h
 #endif
@@ -51,10 +51,6 @@ void loop();
 #ifndef Adafruit_SSD1306_h
 #define Adafruit_SSD1306_h
 #endif
-
-// We need to provide dummy headers so #include <Wire.h> works if they are searched in simulator directory
-// or we just rely on -I simulator/ and provide those files as empty.
-// Let's create dummy files.
 
 #ifdef USE_V2
 #include "../estimator2_esp32.ino"
@@ -85,10 +81,17 @@ void log_csv(std::ostream& os) {
        << debug_alpha << std::endl;
 }
 
+struct Event {
+    double time;
+    bool door_open;
+    bool compressor_on;
+};
+
 int main(int argc, char** argv) {
     double ambient = 25.0;
     double mass_ratio = 1.0;
     std::string out_path = "";
+    double sim_duration = 86400.0; // 24 hours by default
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -98,6 +101,8 @@ int main(int argc, char** argv) {
             mass_ratio = std::stod(argv[++i]);
         } else if (arg == "--out" && i + 1 < argc) {
             out_path = argv[++i];
+        } else if (arg == "--duration" && i + 1 < argc) {
+            sim_duration = std::stod(argv[++i]);
         }
     }
 
@@ -111,56 +116,41 @@ int main(int argc, char** argv) {
         out = &file_out;
     }
 
-    #ifdef USE_V2
-    float target = temp_target;
-    #else
-    float target = temp_threshold;
-    #endif
-
-    std::cerr << "Starting Simulation. Target: " << target << "C, Ambient: " << ambient << "C, Mass: " << mass_ratio << "x" << std::endl;
     *out << "time,true_air,est,door,compressor,filtered_temp,food_proxy,true_food,target,active_rate,confidence,alpha" << std::endl;
 
-    for (int cycle = 0; cycle < 5; ++cycle) {
-        // 1. Cool down
-        fridge.compressor_on = true;
-        while (fridge.t_air > 2.0) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
-        }
-        fridge.compressor_on = false;
+    std::mt19937 event_gen(1337);
+    std::uniform_real_distribution<double> door_chance(0, 1);
+    std::uniform_real_distribution<double> door_duration(5, 60);
 
-        // Stabilization
-        for (int i = 0; i < 60; ++i) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
+    double next_door_event = 3600.0; // First door event at 1 hour
+
+    for (double t = 0; t < sim_duration; t += 1.0) {
+        // Simple bang-bang controller for the fridge
+        if (fridge.t_air > 4.5) fridge.compressor_on = true;
+        if (fridge.t_air < 1.5) fridge.compressor_on = false;
+
+        // Random door events
+        if (t >= next_door_event) {
+            fridge.door_open = true;
+            double duration = door_duration(event_gen);
+            for(int i=0; i<(int)duration; ++i) {
+                current_millis += 1000;
+                fridge.update(1.0);
+                loop();
+                log_csv(*out);
+                t += 1.0;
+            }
+            fridge.door_open = false;
+            // Next event in 30 mins to 4 hours
+            std::uniform_real_distribution<double> next_event_dist(1800, 14400);
+            next_door_event = t + next_event_dist(event_gen);
         }
 
-        // 2. Open door
-        fridge.door_open = true;
-        int open_time = 20 + (cycle * 10);
-        for (int i = 0; i < open_time; ++i) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
-        }
-        fridge.door_open = false;
-
-        // 3. Wait for threshold
-        unsigned long start_wait = current_millis;
-        // Wait until true food temp hits target + some margin
-        while (fridge.t_food < target + 0.3 && (current_millis - start_wait < 14400000)) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
-        }
+        current_millis += 1000;
+        fridge.update(1.0);
+        loop();
+        log_csv(*out);
     }
 
-    std::cerr << "Simulation finished." << std::endl;
     return 0;
 }

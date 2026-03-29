@@ -4,8 +4,8 @@ import numpy as np
 import os
 import json
 
-def run_sim(version, ambient, mass, output_file):
-    print(f"Running {version} (Ambient: {ambient}C, Mass: {mass}x)...")
+def run_sim(version, ambient, mass, duration, output_file):
+    print(f"Running {version} (Ambient: {ambient}C, Mass: {mass}x, Duration: {duration}s)...")
 
     cmd = ["g++", "-O3", "simulator/main.cpp", "-o", "simulator/sim", "-Isimulator/"]
     if version == "V2":
@@ -15,44 +15,75 @@ def run_sim(version, ambient, mass, output_file):
     subprocess.run(cmd, check=True, capture_output=True)
 
     # Run
-    subprocess.run(["./simulator/sim", "--out", output_file, "--ambient", str(ambient), "--mass", str(mass)],
+    subprocess.run(["./simulator/sim", "--out", output_file, "--ambient", str(ambient), "--mass", str(mass), "--duration", str(duration)],
                    check=True, capture_output=True)
 
 def analyze(csv_file):
     df = pd.read_csv(csv_file)
 
-    # Calculate true remaining time
-    df['cycle'] = (df['compressor'].diff() != 0).cumsum()
-    warming_cycles = df[df['compressor'] == 0]
+    # Calculate true remaining time to hit 4C target for food
+    target = 4.0
 
-    maes = []
+    # We find all points where true_food hits 4C
+    # Then for each point we calculate how long until then.
+    # This is a bit complex for a stochastic 24h run since it might hit 4C multiple times if the fridge warms up.
+    # Actually the simulator I just wrote doesn't force a warming cycle. It's a bang-bang controller.
+    # So the fridge stays cold.
 
-    for cycle_id in warming_cycles['cycle'].unique():
-        cycle_df = warming_cycles[warming_cycles['cycle'] == cycle_id].copy()
-        if cycle_df.empty: continue
-        target = cycle_df['target'].iloc[0]
+    # Let's define the "Remaining Time" task:
+    # If the power went out right now, how long until food hits 4C?
 
-        # Find time where it first hits target
-        hit_points = cycle_df[cycle_df['true_food'] >= target]
-        if hit_points.empty:
-            continue
+    # To compute this, we need a separate simulation or a model.
+    # Alternatively, we can let the simulator periodically "turn off" the fridge to measure true time.
+    # For now, let's use the ground truth physics to calculate true_remaining:
+    # T_food(t) = T_amb - (T_amb - T_food_0) * exp(-alpha_true * t)
+    # 4 = T_amb - (T_amb - T_food_0) * exp(-alpha_true * t_rem)
+    # exp(-alpha_true * t_rem) = (T_amb - 4) / (T_amb - T_food_0)
+    # -alpha_true * t_rem = ln((T_amb - 4) / (T_amb - T_food_0))
+    # t_rem = - (1 / alpha_true) * ln((T_amb - 4) / (T_amb - T_food_0))
 
-        t_hit = hit_points['time'].iloc[0]
-        cycle_df['true_remaining'] = t_hit - cycle_df['time']
-        cycle_df.loc[cycle_df['true_remaining'] < 0, 'true_remaining'] = 0
+    # We need the true alpha_sys for the simulator.
+    # FridgeSim: t_food_dot = - (t_food - t_air) / (r_coupling * c_food)
+    # This is not a simple Newton's Law if air is also moving.
+    # But if we assume air equilibrates with ambient quickly:
+    # t_food_dot = - (t_food - t_amb) / ((r_insulation + r_coupling) * c_food)
+    # alpha_true = 1 / ((r_insulation + r_coupling) * c_food)
 
-        # We only evaluate when it's warming and we haven't hit target yet
-        # AND when we are at least 5 mins into the cycle
-        eval_points = cycle_df[(cycle_df['true_remaining'] > 0) & (cycle_df['time'] > cycle_df['time'].min() + 300)]
+    r_ins = 40.0
+    r_coup = 10.0
 
-        if len(eval_points) > 0:
-            mae = np.mean(np.abs(eval_points['est'] - eval_points['true_remaining']))
-            maes.append(mae)
+    # Read mass ratio from filename or pass it
+    mass_ratio = 1.0
+    if "Heavy" in csv_file: mass_ratio = 2.0
+    if "Light" in csv_file: mass_ratio = 0.5
 
-    avg_mae = np.mean(maes) if maes else 9999
+    c_food = 2000.0 * mass_ratio
+    alpha_true = 1.0 / ((r_ins + r_coup) * c_food)
+
+    ambient = 25.0
+    if "Hot" in csv_file: ambient = 35.0
+    if "Cold" in csv_file: ambient = 15.0
+
+    def calc_true_rem(row):
+        t_f = row['true_food']
+        if t_f >= 4.0: return 0.0
+        ratio = (ambient - 4.0) / (ambient - t_f)
+        if ratio <= 0: return 43200.0
+        return - (1.0 / alpha_true) * np.log(ratio)
+
+    df['true_remaining'] = df.apply(calc_true_rem, axis=1)
+
+    # We only evaluate when compressor is OFF and door is CLOSED
+    eval_points = df[(df['compressor'] == 0) & (df['door'] == 0) & (df['time'] > 3600)]
+
+    if len(eval_points) > 0:
+        mae = np.mean(np.abs(eval_points['est'] - eval_points['true_remaining']))
+    else:
+        mae = 9999
+
     jumpiness = np.mean(np.abs(df['est'].diff().dropna()))
 
-    return avg_mae, jumpiness
+    return mae, jumpiness
 
 def main():
     scenarios = [
@@ -64,11 +95,12 @@ def main():
     ]
 
     results = []
+    duration = 86400 # 24 hours
 
     for version in ["V1", "V2"]:
         for sc in scenarios:
-            filename = f"results_{version}_{sc['name']}.csv"
-            run_sim(version, sc['ambient'], sc['mass'], filename)
+            filename = f"results_{version}_{sc['name']}_24h.csv"
+            run_sim(version, sc['ambient'], sc['mass'], duration, filename)
             mae, jump = analyze(filename)
             results.append({
                 "Version": version,
@@ -80,8 +112,8 @@ def main():
             print(f"{version} {sc['name']}: MAE={mae:.1f}, Jumpiness={jump:.2f}")
 
     df_results = pd.DataFrame(results)
-    df_results.to_csv("extensive_results.csv", index=False)
-    print("\nResults saved to extensive_results.csv")
+    df_results.to_csv("extensive_results_24h.csv", index=False)
+    print("\nResults saved to extensive_results_24h.csv")
 
 if __name__ == "__main__":
     main()
