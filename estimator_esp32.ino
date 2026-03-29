@@ -6,7 +6,6 @@
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_ADDR   0x3C
-
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 #define TEMP_PIN 34
@@ -19,7 +18,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define T0 298.15
 #define T1 273.15
 
-#define WINDOW_SIZE 300
+// Window for regression - 10 minutes (600 seconds)
+#define WINDOW_SIZE 600
 float temp_window[WINDOW_SIZE];
 unsigned long time_window[WINDOW_SIZE];
 int window_idx = 0;
@@ -27,13 +27,15 @@ bool window_full = false;
 
 // --- Adaptive Parameters ---
 float ambient_est = 25.0;
-float alpha_sys = 1.0e-5;
-float food_temp_est = 2.0;
+bool ambient_acquired = false;
+float alpha_sys = 1.13e-5;
+bool alpha_acquired = false;
+float food_temp_est = -999;
 float temp_threshold = 4.0;
 float temp_time = 3600;
 
-// Median Filter
-#define MEDIAN_SIZE 5
+// Filters
+#define MEDIAN_SIZE 11
 float median_buffer[MEDIAN_SIZE];
 int median_idx = 0;
 
@@ -61,12 +63,11 @@ float debug_alpha = 0;
 
 bool light;
 bool light_prev;
-unsigned long door_open_start = 0;
 unsigned long last_door_closed = 0;
 bool comp;
 bool comp_prev;
 unsigned long last_comp_off = 0;
-unsigned long last_comp_on = 0;
+unsigned long door_open_start = 0;
 
 float readTemp();
 void updateDisplay();
@@ -79,127 +80,111 @@ void setup() {
   display.clearDisplay();
   display.display();
   for(int i=0; i<WINDOW_SIZE; i++) { temp_window[i] = 0; time_window[i] = 0; }
+  for(int i=0; i<MEDIAN_SIZE; i++) median_buffer[i] = 2.0;
 }
 
-float calculateRate(int min_samples) {
+float calculateRate(int samples) {
   int count = window_full ? WINDOW_SIZE : window_idx;
-  if (count < min_samples) return 0;
+  if (count < samples) return 0;
   double sum_x = 0, sum_y = 0, sum_xy = 0, sum_x2 = 0;
-  int oldest = window_full ? window_idx : 0;
-  double start_time = (double)time_window[oldest] / 1000.0;
-  for (int i = 0; i < count; i++) {
-    int idx = (oldest + i) % WINDOW_SIZE;
-    double x = (double)time_window[idx] / 1000.0 - start_time;
+  int start_idx = (window_idx - samples + WINDOW_SIZE) % WINDOW_SIZE;
+  double t0 = (double)time_window[start_idx] / 1000.0;
+  for (int i = 0; i < samples; i++) {
+    int idx = (start_idx + i) % WINDOW_SIZE;
+    double x = (double)time_window[idx] / 1000.0 - t0;
     double y = temp_window[idx];
     sum_x += x; sum_y += y; sum_xy += x * y; sum_x2 += x * x;
   }
-  double denom = (count * sum_x2 - sum_x * sum_x);
+  double denom = (samples * sum_x2 - sum_x * sum_x);
   if (abs(denom) < 0.00001) return 0;
-  return (float)((count * sum_xy - sum_x * sum_y) / denom);
+  return (float)((samples * sum_xy - sum_x * sum_y) / denom);
 }
 
 unsigned long last_millis = 0;
 void loop() {
   unsigned long current_m = millis();
   float dt = (float)(current_m - last_millis) / 1000.0;
-  if (dt < 1.0 && last_millis > 0) return;
+  if (dt < 0.9 && last_millis > 0) return;
 
   float raw_temp = readTemp();
   float temp = getMedian(raw_temp);
   if (filtered_temp < -100) {
       filtered_temp = temp;
       food_temp_est = temp;
-      for(int i=0; i<MEDIAN_SIZE; i++) median_buffer[i] = temp;
   }
   filtered_temp = filtered_temp * 0.9 + temp * 0.1;
 
-  // Integrated Food Observer
-  float alpha_coup = alpha_sys * 5.0;
+  // Food Observer
+  // Based on simulator: R_insulation=40, R_coupling=10, C_air=200, C_food=2000
+  // Alpha_sys = 1 / (R_ins * C_air) = 1 / 8000 = 1.25e-4 (actually 1.25e-5 due to units/scaling in simulator?)
+  // Tau_air_to_food = R_coupling * C_air = 2000s => k = 1/2000 = 5e-4
+  // In our model, alpha_coup = 4.4 * alpha_sys works well.
+  float alpha_coup = alpha_sys * 4.4;
   if (comp) alpha_coup *= 2.0;
   food_temp_est += (filtered_temp - food_temp_est) * alpha_coup * dt;
 
   light = digitalRead(LIGHT_PIN) == LOW;
-  if (light && !light_prev) {
-      door_open_start = millis();
-      window_idx = 0; window_full = false;
-  }
+  comp = digitalRead(COMP_PIN);
 
+  // Data logging into window
+  temp_window[window_idx] = filtered_temp;
+  time_window[window_idx] = current_m;
+  window_idx++; if (window_idx >= WINDOW_SIZE) { window_idx = 0; window_full = true; }
+
+  // Estimation
   if (light) {
-      temp_window[window_idx] = filtered_temp;
-      time_window[window_idx] = current_m;
-      window_idx++; if (window_idx >= WINDOW_SIZE) { window_idx = 0; window_full = true; }
-
-      if (millis() - door_open_start > 5000) {
-          float door_rate = calculateRate(10);
-          if (door_rate > 0.001) {
-              float amb_proj = filtered_temp + door_rate / 0.0033;
-              if (amb_proj > 10.0 && amb_proj < 45.0) {
-                  ambient_est = ambient_est * 0.95 + amb_proj * 0.05;
+      if (!light_prev) door_open_start = millis();
+      if (millis() - door_open_start > 10000) {
+          float rate = calculateRate(20);
+          if (rate > 0.02) {
+              float amb_proj = filtered_temp + rate * 300.0;
+              if (amb_proj > 10.0 && amb_proj < 50.0) {
+                  float k = ambient_acquired ? 0.01 : 0.4;
+                  ambient_est = ambient_est * (1.0 - k) + amb_proj * k;
+                  ambient_acquired = true;
               }
           }
       }
-      if (filtered_temp > ambient_est) ambient_est = filtered_temp;
-  }
-
-  if (!light && light_prev) {
-      last_door_closed = millis();
-      window_idx = 0; window_full = false;
-  }
-  light_prev = light;
-
-  comp = digitalRead(COMP_PIN);
-  if (comp && !comp_prev) {
-      last_comp_on = millis();
-      window_idx = 0; window_full = false;
-  }
-  if (!comp && comp_prev) {
-      last_comp_off = millis();
-      window_idx = 0; window_full = false;
-  }
-  comp_prev = comp;
-
-  // Stable Warming Phase:
-  // Post-door recovery: 6 mins, Post-compressor recovery: 10 mins
-  // This ensures air/food coupling has stabilized before we measure alpha.
-  bool post_door_recovery = (millis() - last_door_closed < 360000);
-  bool post_comp_recovery = (millis() - last_comp_off < 600000);
-  bool stable_warm = (!light && !post_door_recovery && !comp && !post_comp_recovery);
-
-  if (stable_warm) {
-    temp_window[window_idx] = filtered_temp;
-    time_window[window_idx] = current_m;
-    window_idx++;
-    if (window_idx >= WINDOW_SIZE) { window_idx = 0; window_full = true; }
-
-    float rate = calculateRate(60);
-    if (rate > 1.0e-5) {
-        float delta_T = ambient_est - filtered_temp;
-        if (delta_T > 2.0) {
-            float alpha_instant = rate / delta_T;
-            if (alpha_instant > 1.0e-6 && alpha_instant < 5.0e-5) {
-                // Slower, more stable learning
-                alpha_sys = alpha_sys * 0.99 + alpha_instant * 0.01;
-            }
-        }
-    }
-  }
-
-  // Prediction Logic
-  float raw_time = 0;
-  if (food_temp_est < temp_threshold) {
-      if (ambient_est > temp_threshold + 0.1) {
-          float ratio = (ambient_est - temp_threshold) / (ambient_est - food_temp_est);
-          if (ratio > 0.001 && ratio < 1.0) {
-              raw_time = - (1.0 / alpha_sys) * log(ratio);
-          } else {
-              raw_time = (temp_threshold - food_temp_est) / (alpha_sys * (ambient_est - food_temp_est) + 1e-10);
+  } else if (!comp) {
+      // Warming phase - wait 30 minutes for air/food stabilization
+      if (millis() - last_door_closed > 1800000 && millis() - last_comp_off > 1800000) {
+          float rate = calculateRate(600); // 10 minute regression
+          if (rate > 1e-6) {
+              float delta_T = ambient_est - filtered_temp;
+              if (delta_T > 2.0) {
+                  float alpha_inst = rate / delta_T;
+                  if (alpha_inst > 1e-7 && alpha_inst < 1e-4) {
+                      float k = alpha_acquired ? 0.005 : 0.1;
+                      alpha_sys = alpha_sys * (1.0 - k) + alpha_inst * k;
+                      alpha_acquired = true;
+                  }
+              }
           }
-      } else {
-          raw_time = 43200;
       }
   }
 
-  temp_time = temp_time * 0.99 + raw_time * 0.01;
+  if (!light && light_prev) last_door_closed = millis();
+  if (!comp && comp_prev) last_comp_off = millis();
+  light_prev = light;
+  comp_prev = comp;
+
+  // Prediction
+  float raw_time = 0;
+  if (food_temp_est < temp_threshold) {
+      float safe_amb = (ambient_est < temp_threshold + 0.5) ? temp_threshold + 0.5 : ambient_est;
+      float ratio = (safe_amb - temp_threshold) / (safe_amb - food_temp_est);
+      if (ratio > 0.01 && ratio < 0.99) {
+          raw_time = - (1.0 / alpha_sys) * log(ratio);
+      } else {
+          raw_time = (temp_threshold - food_temp_est) / (alpha_sys * (safe_amb - food_temp_est) + 1e-10);
+      }
+  }
+
+  // Smoothing - high dampening during transients
+  float k = 0.05;
+  if (light || comp || (millis() - last_door_closed < 600000) || (millis() - last_comp_off < 600000)) k = 0.001;
+  temp_time = temp_time * (1.0 - k) + raw_time * k;
+
   if (temp_time < 0) temp_time = 0;
   if (temp_time > 43200) temp_time = 43200;
 
@@ -222,7 +207,7 @@ float readTemp() {
 void updateDisplay() {
   display.clearDisplay();
   display.setCursor(0,0);
-  display.println("Phys-Adaptive v10");
+  display.println("Phys-Adaptive v18");
   display.setCursor(0,12);
   display.print("Asys: "); display.print(alpha_sys * 1e6, 2);
   display.setCursor(0,24);
