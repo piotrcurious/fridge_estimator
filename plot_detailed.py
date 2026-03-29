@@ -39,14 +39,17 @@ def plot_scenario(v1_csv, v2_csv, scenario_name):
     ax1b.set_ylim(0, 15000)
 
     # Ax2: Internal States (Alpha and Confidence for V1)
-    ax2.plot(df1['time'], df1['alpha'], label='V1 Adaptive Alpha', color='purple')
-    ax2.set_ylabel('Alpha', color='purple')
-    ax2.tick_params(axis='y', labelcolor='purple')
+    ax2.plot(df1['time'], df1['alpha'], label='V1 Alpha', color='purple')
+    ax2.plot(df2['time'], df2['alpha'], label='V2 Alpha', color='orange', alpha=0.6)
+    ax2.set_ylabel('Alpha')
+    ax2.legend(loc='upper left')
 
     ax2b = ax2.twinx()
-    ax2b.plot(df1['time'], df1['confidence'], label='V1 Confidence', color='brown', alpha=0.5)
-    ax2b.set_ylabel('Confidence', color='brown')
-    ax2b.set_ylim(0, 1.1)
+    ax2b.plot(df1['time'], df1['confidence'], label='V1 Confidence', color='brown', alpha=0.3)
+    ax2b.plot(df1['time'], df1['food_proxy'], label='V1 Food Est', color='green', linestyle=':', alpha=0.7)
+    ax2b.plot(df2['time'], df2['active_rate'], label='V2 Food Est', color='red', linestyle=':', alpha=0.7)
+    ax2b.set_ylabel('State / Proxy Temp')
+    ax2b.legend(loc='upper right')
 
     plt.title(f"Detailed Analysis: {scenario_name}")
     plt.savefig(f"analysis_{scenario_name.lower()}.png")
