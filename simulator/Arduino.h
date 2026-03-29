@@ -23,11 +23,13 @@ typedef uint8_t byte;
 class MockSerial {
 public:
     void begin(int baud) {}
-    void print(const char* s) { std::cout << s; }
-    void print(float f, int p = 2) { std::cout << f; }
-    void println(const char* s) { std::cout << s << std::endl; }
-    void println(float f, int p = 2) { std::cout << f << std::endl; }
-    void println(const std::string& s) { std::cout << s << std::endl; }
+    void print(const char* s) { }
+    void print(float f, int p = 2) { }
+    void println(const char* s) { }
+    void println(float f, int p = 2) { }
+    void println(const std::string& s) { }
+    bool available() { return false; }
+    std::string readStringUntil(char c) { return ""; }
 };
 extern MockSerial Serial;
 
@@ -60,6 +62,7 @@ public:
 };
 
 #define F(s) s
+#define String std::string
 
 // Arduino functions
 unsigned long millis();
@@ -73,6 +76,7 @@ using std::log;
 using std::pow;
 using std::exp;
 using std::sqrt;
+using std::abs;
 
 template <typename T, typename T2, typename T3>
 T constrain(T x, T2 a, T3 b) {

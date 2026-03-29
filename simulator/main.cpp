@@ -2,6 +2,8 @@
 #include "PhysicsSim.h"
 #include <iostream>
 #include <fstream>
+#include <iomanip>
+#include <vector>
 
 MockSerial Serial;
 MockWire Wire;
@@ -36,99 +38,113 @@ void delay(unsigned long ms) {
     current_millis += ms;
 }
 
-// Forward declarations for functions in .ino
-float readTemp();
-float logEst(float rate);
-void addSample(float s);
-float calcMean();
-void adjustWeight(float error);
-void resetLight();
-void resetEstimate();
-void fitCorr();
-void correctArray(float corr);
-float estimateTempLoss();
-float estimateTime();
-void updateDisplay();
+// Prototypes
+void setup();
+void loop();
 
+#ifndef Wire_h
 #define Wire_h
+#endif
+#ifndef Adafruit_GFX_h
 #define Adafruit_GFX_h
+#endif
+#ifndef Adafruit_SSD1306_h
 #define Adafruit_SSD1306_h
+#endif
 
-#ifdef USE_ESTIMATOR_2
+#ifdef USE_V2
 #include "../estimator2_esp32.ino"
 #else
 #include "../estimator_esp32.ino"
 #endif
 
 void log_csv(std::ostream& os) {
-    #ifdef USE_ESTIMATOR_2
+    #ifdef USE_V2
     float est = time_est;
+    float target = temp_target;
     #else
     float est = temp_time;
+    float target = temp_threshold;
     #endif
-    os << current_millis/1000.0 << "," << temp << "," << est << "," << (fridge.door_open?1:0) << "," << (fridge.compressor_on?1:0) << std::endl;
+
+    os << current_millis/1000.0 << ","
+       << fridge.t_air << ","
+       << est << ","
+       << (fridge.door_open?1:0) << ","
+       << (fridge.compressor_on?1:0) << ","
+       << filtered_temp << ","
+       << food_temp_est << ","
+       << fridge.t_food << ","
+       << target << ","
+       << debug_active_rate << ","
+       << debug_confidence << ","
+       << debug_alpha << std::endl;
 }
 
 int main(int argc, char** argv) {
+    double ambient = 25.0;
+    double mass_ratio = 1.0;
+    double swing = 0.0;
+    std::string out_path = "";
+    double sim_duration = 86400.0;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--ambient" && i + 1 < argc) {
+            ambient = std::stod(argv[++i]);
+        } else if (arg == "--mass" && i + 1 < argc) {
+            mass_ratio = std::stod(argv[++i]);
+        } else if (arg == "--out" && i + 1 < argc) {
+            out_path = argv[++i];
+        } else if (arg == "--duration" && i + 1 < argc) {
+            sim_duration = std::stod(argv[++i]);
+        } else if (arg == "--swing" && i + 1 < argc) {
+            swing = std::stod(argv[++i]);
+        }
+    }
+
+    fridge.setParams(ambient, mass_ratio, swing);
     setup();
 
     std::ostream* out = &std::cout;
     std::ofstream file_out;
-    if (argc > 1) {
-        file_out.open(argv[1]);
+    if (!out_path.empty()) {
+        file_out.open(out_path);
         out = &file_out;
     }
 
-    // Parameters for target threshold
-    #ifdef USE_ESTIMATOR_2
-    float target = temp_target;
-    #else
-    float target = temp_threshold;
-    #endif
+    *out << "time,true_air,est,door,compressor,filtered_temp,food_proxy,true_food,target,active_rate,confidence,alpha" << std::endl;
 
-    std::cerr << "Starting Simulation. Target: " << target << "C" << std::endl;
-    *out << "time,temp,est,door,compressor" << std::endl;
+    std::mt19937 event_gen(1337);
+    std::uniform_real_distribution<double> door_chance(0, 1);
+    std::uniform_real_distribution<double> door_duration(5, 60);
 
-    for (int cycle = 0; cycle < 5; ++cycle) {
-        // 1. Cool down
-        fridge.compressor_on = true;
-        while (fridge.t_air > 2.0) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
-        }
-        fridge.compressor_on = false;
+    double next_door_event = 3600.0;
 
-        // Stabilization
-        for (int i = 0; i < 60; ++i) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
+    for (double t = 0; t < sim_duration; t += 1.0) {
+        if (fridge.t_air > 4.5) fridge.compressor_on = true;
+        if (fridge.t_air < 1.5) fridge.compressor_on = false;
+
+        if (t >= next_door_event) {
+            fridge.door_open = true;
+            double duration = door_duration(event_gen);
+            for(int i=0; i<(int)duration; ++i) {
+                current_millis += 1000;
+                fridge.update(1.0);
+                loop();
+                log_csv(*out);
+                t += 1.0;
+            }
+            fridge.door_open = false;
+            std::uniform_real_distribution<double> next_event_dist(1800, 14400);
+            next_door_event = t + next_event_dist(event_gen);
         }
 
-        // 2. Open door
-        fridge.door_open = true;
-        int open_time = 20 + (cycle * 10);
-        for (int i = 0; i < open_time; ++i) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
-        }
-        fridge.door_open = false;
-
-        // 3. Wait for threshold
-        unsigned long start_wait = current_millis;
-        while (temp < target + 0.2 && current_millis - start_wait < 7200000) {
-            current_millis += 1000;
-            fridge.update(1.0);
-            loop();
-            log_csv(*out);
-        }
+        current_millis += 1000;
+        fridge.update(1.0);
+        loop();
+        log_csv(*out);
     }
 
-    std::cerr << "Simulation finished." << std::endl;
     return 0;
 }
