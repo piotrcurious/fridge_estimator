@@ -116,14 +116,14 @@ int main(int argc, char** argv) {
     *out << "time,true_air,est,door,compressor,filtered_temp,food_proxy,true_food,target,active_rate,confidence,alpha" << std::endl;
 
     std::mt19937 event_gen(1337);
-    std::uniform_real_distribution<double> door_chance(0, 1);
     std::uniform_real_distribution<double> door_duration(5, 60);
 
     double next_door_event = 3600.0;
 
     for (double t = 0; t < sim_duration; t += 1.0) {
-        if (fridge.t_air > 4.5) fridge.compressor_on = true;
-        if (fridge.t_air < 1.5) fridge.compressor_on = false;
+        // More aggressive hysteresis for visible cycles
+        if (fridge.t_air > 5.5) fridge.compressor_on = true;
+        if (fridge.t_air < 1.0) fridge.compressor_on = false;
 
         if (t >= next_door_event) {
             fridge.door_open = true;

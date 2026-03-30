@@ -24,23 +24,32 @@ unsigned long time_window[WINDOW_SIZE];
 int window_idx = 0;
 bool window_full = false;
 
+// --- Kalman Filter Parameters ---
+float amb_p = 10.0; // Uncertainty
+float amb_q = 0.01; // Process noise
+float amb_r = 1.0;  // Measurement noise
+float alpha_p = 1e-4;
+float alpha_q = 1e-8;
+float alpha_r = 1e-4;
+
 // --- Adaptive Parameters ---
 float ambient_est = 25.0;
 bool ambient_acquired = false;
-float alpha_sys = 1.0e-5;
+float alpha_air = 4.0e-4;
+float alpha_sys = 4.0e-5;
 bool alpha_acquired = false;
 float food_temp_est = -999;
 float temp_threshold = 4.0;
 float temp_time = 3600;
 
 // Variance Calculation
-#define VAR_SIZE 60
+#define VAR_SIZE 120
 float rate_history[VAR_SIZE];
 int var_idx = 0;
 bool var_full = false;
 
 // Filters
-#define MEDIAN_SIZE 11
+#define MEDIAN_SIZE 15
 float median_buffer[MEDIAN_SIZE];
 int median_idx = 0;
 
@@ -72,8 +81,7 @@ unsigned long last_door_closed = 0;
 bool comp;
 bool comp_prev;
 unsigned long last_comp_off = 0;
-unsigned long last_comp_on = 0;
-float comp_start_temp = 0;
+float door_open_peak = -999;
 
 float readTemp();
 void updateDisplay();
@@ -107,6 +115,13 @@ float calculateRate(int samples) {
   return (float)((samples * sum_xy - sum_x * sum_y) / denom);
 }
 
+void updateKalman(float& x, float& p, float q, float r, float z) {
+    p = p + q;
+    float k = p / (p + r);
+    x = x + k * (z - x);
+    p = (1.0 - k) * p;
+}
+
 unsigned long last_millis = 0;
 void loop() {
   unsigned long current_m = millis();
@@ -119,10 +134,10 @@ void loop() {
       filtered_temp = temp;
       food_temp_est = temp;
   }
-  filtered_temp = filtered_temp * 0.9 + temp * 0.1;
+  filtered_temp = filtered_temp * 0.95 + temp * 0.05;
 
-  // Food Observer - matches system alpha
-  float alpha_coup = alpha_sys * 1.5;
+  // Food Observer
+  float alpha_coup = alpha_sys * 4.0;
   if (comp) alpha_coup *= 2.0;
   food_temp_est += (filtered_temp - food_temp_est) * alpha_coup * dt;
 
@@ -136,38 +151,46 @@ void loop() {
 
   // Estimation
   if (light) {
+      if (!light_prev) door_open_peak = filtered_temp;
+      if (filtered_temp > door_open_peak) door_open_peak = filtered_temp;
+
       float rate = calculateRate(15);
       if (rate > 0.01) {
-          float amb_proj = filtered_temp + rate * 300.0;
-          if (amb_proj > 10.0 && amb_proj < 50.0) {
-              float k = ambient_acquired ? 0.01 : 0.4;
-              ambient_est = ambient_est * (1.0 - k) + amb_proj * k;
-              ambient_acquired = true;
+          float z = filtered_temp + rate * 180.0;
+          if (z > 5.0 && z < 60.0) {
+              if (!ambient_acquired) { ambient_est = z; ambient_acquired = true; }
+              else updateKalman(ambient_est, amb_p, amb_q, amb_r, z);
           }
       }
-  } else if (!comp) {
-      // Stability Detection via Rate Variance
-      float r = calculateRate(30);
-      rate_history[var_idx] = r;
-      var_idx++; if (var_idx >= VAR_SIZE) { var_idx = 0; var_full = true; }
+  } else {
+      if (light_prev && door_open_peak > 5.0) {
+          float z = door_open_peak + 5.0;
+          updateKalman(ambient_est, amb_p, amb_q * 10, amb_r, z);
+      }
 
-      if (var_full) {
-          float sum = 0, sq_sum = 0;
-          for(int i=0; i<VAR_SIZE; i++) { sum += rate_history[i]; sq_sum += rate_history[i]*rate_history[i]; }
-          float mean = sum / VAR_SIZE;
-          float var = (sq_sum / VAR_SIZE) - (mean * mean);
+      if (!comp) {
+          float r = calculateRate(30);
+          rate_history[var_idx] = r;
+          var_idx++; if (var_idx >= VAR_SIZE) { var_idx = 0; var_full = true; }
 
-          bool stable = (mean > 1e-6 && var < 1e-9);
-          bool recovery = (millis() - last_door_closed < 300000 || millis() - last_comp_off < 300000);
+          if (var_full) {
+              float sum = 0, sq_sum = 0;
+              for(int i=0; i<VAR_SIZE; i++) { sum += rate_history[i]; sq_sum += rate_history[i]*rate_history[i]; }
+              float mean = sum / VAR_SIZE;
+              float var = (sq_sum / VAR_SIZE) - (mean * mean);
 
-          if (stable && !recovery) {
-              float delta_T = ambient_est - filtered_temp;
-              if (delta_T > 2.0) {
-                  float alpha_inst = mean / delta_T;
-                  if (alpha_inst > 1e-7 && alpha_inst < 1e-4) {
-                      float k = alpha_acquired ? 0.005 : 0.1;
-                      alpha_sys = alpha_sys * (1.0 - k) + alpha_inst * k;
-                      alpha_acquired = true;
+              bool stable = (mean > 1e-6 && var < 1.0e-3);
+              bool recovery = (millis() - last_door_closed < 300000 || millis() - last_comp_off < 300000);
+
+              if (stable && !recovery) {
+                  float delta_T = ambient_est - filtered_temp;
+                  if (delta_T > 2.0) {
+                      float z = mean / delta_T;
+                      if (z > 1e-7 && z < 2e-3) {
+                          if (!alpha_acquired) { alpha_air = z; alpha_acquired = true; }
+                          else updateKalman(alpha_air, alpha_p, alpha_q, alpha_r, z);
+                          alpha_sys = alpha_air * 0.1;
+                      }
                   }
               }
           }
@@ -191,8 +214,8 @@ void loop() {
       }
   }
 
-  float k = 0.05;
-  if (light || comp || (millis() - last_door_closed < 300000) || (millis() - last_comp_off < 300000)) k = 0.002;
+  // Heavy prediction smoothing (Kalman output is stable, but result of formula can be jumpy)
+  float k = (light || comp || (millis() - last_door_closed < 300000) || (millis() - last_comp_off < 300000)) ? 0.002 : 0.02;
   temp_time = temp_time * (1.0 - k) + raw_time * k;
 
   if (temp_time < 0) temp_time = 0;
@@ -217,7 +240,7 @@ float readTemp() {
 void updateDisplay() {
   display.clearDisplay();
   display.setCursor(0,0);
-  display.println("Phys-Adaptive v20");
+  display.println("Phys-Adaptive v25");
   display.setCursor(0,12);
   display.print("Asys: "); display.print(alpha_sys * 1e6, 2);
   display.setCursor(0,24);
