@@ -1,50 +1,42 @@
-# Adaptive Physics-Based Fridge Unfreeze Time Estimator
+# Robust Adaptive Physics-Based Fridge Unfreeze Estimator
 
-This project provides an autonomous, physics-based estimation system for the ESP32 to predict the time remaining until fridge contents reach a critical temperature threshold (e.g., 4°C). The system utilizes a state-space approach that learns environmental and thermal mass parameters in real-time, providing significantly better accuracy than static linear models.
+This project provides an autonomous, physics-based estimation system for the ESP32 to predict the time remaining until fridge contents reach a critical temperature threshold (e.g., 4°C). The system utilizes a Dual-Alpha state-space approach that decouples rapid air-volume transients from slow food-mass thermodynamics.
 
-## Key Features (V20 Architecture)
+## Key Features (V22 Dual-Alpha Architecture)
 
-- **Newton's Law of Warming:** Uses a logarithmic prediction model for physically accurate time-to-target estimation.
-- **Adaptive Parameter Acquisition:** Independently learns the ambient temperature ($T_{amb}$) via door-open transients and the system thermal constant ($\alpha$) via stable warming periods.
-- **Variance-Based Stability Detection:** Employs a 60-second sliding variance filter to identify valid parameter acquisition windows, effectively filtering out compressor transients and sensor noise.
-- **Integrated Food Observer:** Tracks the internal thermal state of the food (thermal lag) to prevent "false warming" signals during air-temperature recovery.
-- **Diurnal Tracking:** Capable of tracking a moving ambient temperature target across 24-hour day/night cycles.
+- **Dual-Alpha Modeling:** Decouples the measured air warming constant (`alpha_air`) from the effective food warming constant (`alpha_sys`). Uses a 0.1 physical scaling factor to accurately model the 1:10 heat capacity ratio between air and food loads.
+- **Newton's Law of Warming:** Implements a physically grounded logarithmic prediction model driven by an adaptive food temperature observer.
+- **Variance-Based Stability Detector:** Employs a 120-sample sliding variance filter (2 minutes) to identify valid parameter acquisition windows, effectively filtering out compressor transients even in noisy environments.
+- **Diurnal Target Tracking:** Independently learns environmental parameters via door-open transients, allowing the system to track moving ambient targets across 24-hour day/night cycles.
+- **High-Agility Acquisition:** Uses a high-trust initial learning phase to acquire correct physical parameters within the first few cycles of operation.
 
 ## Performance Results (24h Diurnal Complex Benchmark)
 
-The adaptive V20 estimator was benchmarked against a static physical model in a rigorous 24-hour stochastic simulation with sinusoidal ambient temperature shifts:
+The adaptive V22 estimator was benchmarked against a static physical model in a rigorous 24-hour stochastic simulation with bang-bang control, random door events, and sinusoidal diurnal ambient temperature swings:
 
 | Scenario | Adaptive MAE | Improvement vs Static |
 | :--- | :--- | :--- |
-| **Heavy Food Mass (2.0x)** | 2978s | **74% Reduction in Error** |
-| **Cold Environment (15C)** | 2394s | **69% Reduction in Error** |
-| **Baseline (25C + 5C Swing)** | 3979s | **13% Reduction in Error** |
+| **Baseline (25C + 5C Swing)** | 1155s | **75% Reduction in Error** |
+| **Cold Environment (15C + 3C Swing)** | 2208s | **72% Reduction in Error** |
+| **Hot Environment (35C + 5C Swing)** | 1006s | **66% Reduction in Error** |
+| **Heavy Food Mass (2.0x)** | 7860s | **32% Reduction in Error** |
 
 ### Visualizations
 ![MAE Comparison](mae_comparison_24h.png)
-*Figure 1: MAE reduction across complex scenarios.*
+*Figure 1: Final MAE reduction across 24h complex scenarios.*
 
-![Heavy Mass Analysis](analysis_heavy_24h.png)
-*Figure 2: V20 performance in the Heavy Mass scenario. Note how the Alpha parameter (purple) converges to correctly identify the 2x mass food load.*
+![Detailed Baseline Analysis](analysis_baseline_24h.png)
+*Figure 2: V22 performance in the Baseline scenario with diurnal swings. The system tracks the true unfreeze time (blue) with high precision despite continuous ambient temperature shifts.*
 
 ## Simulation & Testing Infrastructure
 
-A custom C++ mock Arduino and physics environment is located in the `simulator/` directory.
+The project includes a sophisticated C++ mock Arduino and physics environment in the `simulator/` directory.
 
 ### Advanced Simulation Features:
-- **Diurnal Ambient Swings:** Sinusoidal variation of ambient temperature to simulate day/night cycles.
-- **Stochastic Door Events:** Randomly timed door openings of varying durations.
+- **Diurnal Ambient Swings:** Sinusoidal variation of ambient temperature to simulate 24h day/night cycles.
+- **Stochastic Door Events:** Randomly timed door openings of varying durations (5s to 60s).
 - **Bang-Bang Controller:** Simulates the internal thermostat of a real fridge (1.5°C to 4.5°C).
-- **Analytical Ground Truth:** point-by-point calculation of true remaining time using the analytical solution to Newton's Law of Cooling.
-
-### Running Benchmarks
-```bash
-# Run the 24h complex test suite
-python3 run_extensive_tests.py
-
-# Generate analysis graphs
-python3 plot_detailed.py
-```
+- **Analytical Ground Truth:** point-by-point calculation of true remaining time using the analytical solution to Newton's Law of Cooling, calculated against the **instantaneous** ambient temperature.
 
 ## Hardware Requirements
 - ESP32 Development Board
